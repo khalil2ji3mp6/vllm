@@ -257,3 +257,8 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /.rocm-version/
 /.rocm-wheel/
 /.rocm-kernel-map/
+
+# vLLM Host simulation runtime and offline downloads
+/vllm-host-offline-*/
+/vllm-host-bench/.host-src/
+/vllm-host-bench/.tools/
