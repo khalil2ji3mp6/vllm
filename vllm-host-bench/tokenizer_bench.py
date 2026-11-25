@@ -48,7 +48,7 @@ def measure_dp(model, prompts, cores, workers, rounds, gate):
         local.tokenizer = tokenizer if compiled else copy.deepcopy(tokenizer)
 
     def encode(prompt):
-        return local.tokenizer.encode_batch([prompt["text"]], add_special_tokens=False)[0].ids
+        return local.tokenizer.encode(prompt["text"], add_special_tokens=False).ids
 
     def timed_encode(prompt):
         start = perf_counter_ns()

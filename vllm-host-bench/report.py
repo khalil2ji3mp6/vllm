@@ -14,8 +14,7 @@ IMAGE_TOTAL = "图片接入与编解码合计"
 LEGACY_IMAGE_ROWS = ("图片／视频读取与解码", "图片 Base64 解码", "图片接入整批", "图片编码（独立样本）")
 IMAGE_ROWS = [
     (IMAGE_TOTAL, "CPU",
-     [point("frontend", "image_decode_rgb"), point("frontend", "image_base64_decode"),
-      point("frontend", "image_ingress_batch"), point("frontend", "image_encode")]),
+     [point("frontend", "image_decode_rgb"), point("frontend", "image_base64_decode")]),
     ("图片 Base64 编码（独立样本）", "CPU",
      [point("frontend", "image_base64_encode")]),
 ]

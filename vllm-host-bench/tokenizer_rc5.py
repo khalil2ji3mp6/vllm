@@ -24,3 +24,14 @@ class GlmRc5Tokenizer(TokenizersBackend):
 
     def encode(self, text, add_special_tokens=True):
         return self._tokenizer.encode(text, add_special_tokens=add_special_tokens).ids
+
+    def __call__(self, text, *, add_special_tokens, truncation=False, max_length=None):
+        # The pinned renderer requests a single string without padding or offsets.
+        # RC5 exposes immutable encodings; Transformers v5 expects mutable v0 settings.
+        ids = self.encode(text, add_special_tokens=add_special_tokens)
+        if truncation and max_length is not None and len(ids) > max_length:
+            if self.truncation_side == "left" and max_length > 0:
+                ids = ids[-max_length:]
+            else:
+                ids = ids[:max_length]
+        return {"input_ids": ids}

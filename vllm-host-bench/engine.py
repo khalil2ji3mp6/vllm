@@ -36,6 +36,7 @@ def config(args, *, skip_tokenizer_init):
         model=str(args.model_metadata), max_model_len=args.max_model_len,
         trust_remote_code=False, skip_tokenizer_init=skip_tokenizer_init,
         dtype="bfloat16", generation_config="vllm",
+        renderer_num_workers=args.renderer_num_workers,
     )
     cache = CacheConfig(
         block_size=args.block_size, enable_prefix_caching=True,

@@ -10,9 +10,11 @@ import os
 import platform
 import sys
 from collections import Counter, defaultdict
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic, perf_counter_ns, process_time_ns, sleep
+from unittest.mock import patch
 
 # These are inherited by spawned children before importing vLLM or PyTorch.
 os.environ.update(
@@ -77,7 +79,7 @@ def frontend_plan(cores, tp, concurrency, with_image, dedicated=False,
     if renderer_workers is None:
         renderer_workers = pool_budget
     return dict(api_server_count=api_servers, renderer_num_workers=renderer_workers,
-                media_loading_threads=media_threads, frontend_slots=pool_budget)
+                media_loading_threads=media_threads)
 
 
 def get(pipe, timeout):
@@ -122,6 +124,22 @@ def await_replica_round(args, name):
         if monotonic() >= deadline:
             raise TimeoutError(f"Timed out waiting to start {name}")
         sleep(0.002)
+
+
+@contextmanager
+def measure_reply_acquire(reply, clock, active):
+    acquire = reply.acquire_read
+
+    @contextmanager
+    def timed_acquire(*args, **kwargs):
+        with ExitStack() as stack:
+            # Retain the SHM read lease through upstream unpacking and release.
+            with clock.span(active["phase"], "engine_worker_reply_acquire"):
+                buf = stack.enter_context(acquire(*args, **kwargs))
+            yield buf
+
+    with patch.object(reply, "acquire_read", timed_acquire):
+        yield
 
 
 def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, workers):
@@ -177,7 +195,7 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                 add(sched, req, hasher)
 
     counts = Counter()
-    with time_scheduler_children(sched, clock) as active:
+    with time_scheduler_children(sched, clock) as active, measure_reply_acquire(reply, clock, active):
         while received < args.concurrency or sched.has_requests():
             if received < args.concurrency:
                 requests = receive_requests(wait=not sched.has_requests())
@@ -226,6 +244,8 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
 
     for sock in sockets:
         sock.send_multipart([b"done"])
+    engine_cpu_ns = process_time_ns() - engine_cpu_start
+    tx.enqueue(("end",), timeout=args.timeout)
     front_rows = defaultdict(list)
     front_tokens = serialized_bytes = 0
     front_metrics = dict(frontend_cpu_ns=0, host_ttft_ns=[], host_request_latency_ns=[],
@@ -250,9 +270,7 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
     front_rows["prefill", "front_prefill_batch"].append((start, ready, 0))
     if image_end is not None:
         front_rows["prefill", "image_ingress_batch"].append((start, image_end, 0))
-    end = perf_counter_ns()
-    engine_cpu_ns = process_time_ns() - engine_cpu_start
-    tx.enqueue(("end",), timeout=args.timeout)
+    end = start + max(front_metrics["host_request_latency_ns"])
     worker_results = [get(pipe, args.timeout) for pipe in workers]
     expected_outputs = args.concurrency * args.new_tokens
     expected_prefill = args.concurrency * (args.prompt_tokens - (args.hit_tokens if case == "l1" else 0))
@@ -273,7 +291,8 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
         0, ready - counts.get("first_scheduled_step_ns", ready),
     )
     counts["start_ns"] = start
-    counts["end_ns"] = max(end, *(checkpoint for _, _, checkpoint in worker_results))
+    counts["end_ns"] = end
+    counts["diagnostic_tail_ns"] = perf_counter_ns() - end
     counts["engine_cpu_ns"] = engine_cpu_ns
     metrics = dict(counts) | front_metrics
     metrics["worker_cpu_ns"] = [cpu_ns for _, cpu_ns, _ in worker_results]

@@ -463,7 +463,7 @@ def run_capacity(args, plan, root):
     workload_profile = dict(
         replicas=len(summaries), request_file_sha256=first["request_file_sha256"],
         metadata_sha256=first["metadata_sha256"], versions=first["versions"], image=image_workload(first),
-        frontend_pipeline="streaming",
+        frontend_pipeline="hf_renderer_rc5", round_end="last_serialized_response",
         **{key: first["parameters"][key] for key in (
             "tp", "concurrency", "prompt_tokens", "new_tokens", "chunk_tokens",
             "max_num_seqs", "max_model_len", "block_size", "blocks", "cases", "warmup", "runs",

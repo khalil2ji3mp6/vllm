@@ -25,17 +25,19 @@ CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NU
 
 默认成功后输出目录包含 `coverage.md`、`prefill.csv` 和 `decode.csv`，内容为两张阶段表。各档使用相同工作负载和预热设置。每轮将同一行的子项和 8 个 DP 的绝对墙钟区间合并，重叠时间只算一次。跨轮累加后除以完成的请求数，得到每请求摊销墙钟，单位 µs/请求。默认 5 轮。`—` 表示未执行或无样本。父阶段和子阶段可能覆盖同一段工作。图片编码作为独立的同步参考轮，在所有 Host 轮完成后测量，同样按完成请求数归一化。失败时保留本次测试输出目录中的 `.runs` 日志。追加 `--keep-diagnostics` 时，成功后也保留 `.runs/cores-*/host-rounds.csv` 和 `replica-*/summary.json` 等原始统计，终端仍输出两张阶段表。
 
+整轮墙钟从最早 DP 开始到最后一个请求的最后一段响应完成本地序列化。每个副本的 `diagnostic_tail_ns` 记录业务完成到收齐诊断的额外时长。Decode 原始打点中，`schedule` 计调度，`worker_cpu_metadata` 计模拟 worker 的输入准备，`engine_worker_reply_acquire` 计引擎等待读取共享内存的墙钟及调用线程 CPU；后者包含在 `engine_worker_reply_wait` 中。
+
 默认每请求使用随包的同一张样图。可以用 `--image-file` 替换为本地 JPEG 或 PNG，用 `--request-file` 替换文本，或者用 `--text-only` 跳过图片。双机对照使用相同的输入文件。请求 JSONL 每行一个 OpenAI 样式的 `messages` 数组，行数等于每副本并发，应用 GLM 模板后必须满足指定的文本 token 长度。
 
 ## 单个 DP 分到 1 核或多核时的影响
 
 标准负载为 DP8 / TP1，每 DP 同时提交 32 条请求。每个副本的前端进程、EngineCore、worker 和线程都在自己的 CPU 核组内。分到 1 核时所有工作在这一核上轮流运行。分到多核后，前端按请求异步处理。不同请求的图片解码和分词可以同时运行，同一请求仍先解图、再做模板和分词。默认场景中，输入准备完成即发给 EngineCore，调度和前端前处理可以重叠。前端同时接收已入队请求的输出。L1 命中场景先统一构建固定前缀，再按该场景的批次调度。
 
-模板保留 Transformers 的 GLM-5.2 模板逻辑，分词线程共享 RC5 的只读 `CompiledTokenizer`。流式反分词保留 vLLM 的输出处理，底层使用 RC5 `DecodeStream`。图片复用 vLLM 的媒体线程池。Schema、模型输入校验、反分词和序列化由各个前端的主线程完成。
+请求经上游 `OnlineRenderer.render_chat`、`HfRenderer.render_chat_async` 进入 vLLM 自带的执行器和 tokenizer 副本池。模板使用 Transformers 的 GLM-5.2 逻辑，分词使用 RC5 的单文本 `encode`，与分词单测的底层入口一致。流式反分词保留 vLLM 的输出处理，底层使用 RC5 `DecodeStream`。图片复用 vLLM 的媒体线程池。Schema、模型输入校验、反分词和序列化由各个前端的主线程完成。
 
-脚本按该 DP 的物理核、TP 数和在途请求数计算前端进程数。给 EngineCore、模型 worker 及每个 API 主线程留出预算后，其余核按前端分配处理名额。每个前端的媒体线程池和分词线程池均可用满自己的名额。请求从图片解码到分词完成共用一个名额，因此两阶段可以重叠，实际并行总数最多等于本前端的预算。线程共享 DP 的 CPU 掩码。
+脚本按该 DP 的物理核、TP 数和在途请求数计算前端进程数。为 EngineCore、worker 和每个 API 主线程预留预算后，其余核用于计算各前端的默认线程数。图片和文本使用各自的线程池，两个池可以同时执行不同请求，共享本 DP 的 CPU 掩码。
 
-标准工作负载下，128 核每 DP 有 1 个前端、13 个前处理名额。192 核每 DP 有 2 个前端、合计 20 个名额。分词单次调用保持一个任务，`TOKENIZERS_PARALLELISM=false`。Decode 使用 vLLM 真实 CPU Scheduler 的同步模式，worker 仍是 Host 元数据实现。并行客户端编码只跑独立参考轮。
+标准负载下，128 核每 DP 有 1 个前端、13 个渲染线程。192 核每 DP 有 2 个前端，每个前端有 10 个渲染线程。分词单次调用保持一个任务，`TOKENIZERS_PARALLELISM=false`。Decode 使用 vLLM 真实 CPU Scheduler 的同步模式，worker 仍是 Host 元数据实现。并行客户端编码只跑独立参考轮。
 
 ### Prefill
 
@@ -43,7 +45,7 @@ CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NU
 | --- | --- | --- |
 | 请求接入、参数校验 | 小。同一前端主线程校验，不同前端可并行 | `--api-server-count` 调整前端进程数 |
 | Chat Template、文本 Tokenizer | 真实 GLM-5.2 tokenizer 逐条编码，不同请求在前端线程池并行。摊销墙钟可随分词线程数增加而降低 | 基准 `--renderer-num-workers` 按核数自动计算，`--api-server-count` 调整前端数。生产可另用 `VLLM_USE_FASTOKENS` 更换 tokenizer 后端 |
-| 图片接入与编解码合计 | 合并图片读取与解码、Base64 解码、整批接入及独立 JPEG 编码。重叠的区间只计一次 | 图片线程按核数和并发自动计算，独立 JPEG 编码使用相同的前端并行预算 |
+| 图片接入与编解码合计 | 服务端 Base64 解码、图片解压和 RGB 转换的时间并集 | 图片线程按核数和并发自动计算，独立 JPEG 编码使用相同的前端并行预算 |
 | 图片 Base64 编码（独立样本） | 小。pybase64 在每个图片任务内编码，多个图片任务可并行 | 图片编码后的字节数 |
 | 多模态 Processor（resize、归一化、patch 等） | 取决于生产 Processor。此版 vLLM 每个 renderer 用独立单线程 executor，单前端加核可减少争抢以及与分词重叠，GLM-5.2 文本基准保留空值 | 生产 `--limit-mm-per-prompt`、`--media-io-kwargs`、`--mm-processor-cache-gb` 改变输入量和缓存 |
 | 前端与引擎间 IPC、请求入队 | 等待和排队可能明显下降，单条序列化、解码和整批入队的 CPU 时间通常变化小 | 基准由 `--cores-per-replica` 提供调度余量 |
@@ -97,7 +99,7 @@ CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NU
 
 ## 图片的测量边界
 
-每个含图请求在自己的文本处理前调用 vLLM `MediaConnector.load_from_url_async`。输入为本地 fixture 生成的 `data:image/...;base64`，通过现有媒体线程池，实际执行 Base64 解码、Pillow 解压和 RGB 转换。报表将图片读取与解码、Base64 解码、整批接入和独立 JPEG 编码合为「图片接入与编解码合计」，按统一的摊销墙钟计算。整批接入已经覆盖的解码区间只计一次。独立 Base64 编码仍单列。样图读取在正式轮次前完成。客户端编码作为独立参考，在正式 Host 测量之后同步执行。HTTP、OpenAI 图片字段 JSON 解析、图片 URL 网络下载和模型侧的视觉处理均未计入。
+每个含图请求在自己的文本处理前调用 vLLM `MediaConnector.load_from_url_async`。输入为本地 fixture 生成的 `data:image/...;base64`，通过现有媒体线程池，实际执行 Base64 解码、Pillow 解压和 RGB 转换。「图片接入与编解码合计」仅计业务轮里 Base64 解码和图片解压、RGB 转换的时间并集。独立 Base64 编码仍单列，独立 JPEG 编码保存在原始诊断中。样图读取在正式轮次前完成。客户端编码作为独立参考，在正式 Host 测量之后同步执行。HTTP、OpenAI 图片字段 JSON 解析、图片 URL 网络下载和模型侧的视觉处理均未计入。
 
 ## 离线安装和版本
 

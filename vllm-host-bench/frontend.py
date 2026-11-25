@@ -1,13 +1,15 @@
 """Local frontend with per-request image and text preprocessing."""
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from time import perf_counter_ns, process_time_ns
 
 import msgspec
 import zmq
 import zmq.asyncio
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.renderers.hf import HfRenderer
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.renderers.hf import HfRenderer, safe_apply_chat_template
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.input_processor import InputProcessor
@@ -58,15 +60,30 @@ def workload_messages(args, tokenizer, request_indices):
     return [entries[index] for index in request_indices]
 
 
-def render_prompt(tokenizer, messages, submitted):
-    clock = Clock()
-    start = perf_counter_ns()
-    clock.rows["prefill", "renderer_queue_wait"].append((submitted, start, 0))
-    with clock.span("prefill", "chat_template"):
-        rendered = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    with clock.span("prefill", "tokenize"):
-        token_ids = tokenizer.encode(rendered, add_special_tokens=False)
-    return rendered, token_ids, (start, perf_counter_ns()), clock.rows
+# The event loop carries this clock with the request. Capture it on submit:
+# run_in_executor does not propagate context variables to executor threads.
+render_clock = ContextVar("render_clock")
+
+
+class MeasuredRenderer(HfRenderer):
+    def __init__(self, cfg, tokenizer):
+        super().__init__(cfg, tokenizer)
+        self._apply_chat_template_async = self._measure("chat_template", safe_apply_chat_template)
+        self._tokenize_prompt_async = self._measure("tokenize", self._tokenize_prompt)
+
+    def _measure(self, stage, function):
+        def submit(*args, **kwargs):
+            clock = render_clock.get()
+            submitted = perf_counter_ns()
+
+            def run():
+                clock.rows["prefill", "renderer_queue_wait"].append((submitted, perf_counter_ns(), 0))
+                with clock.span("prefill", stage):
+                    return function(*args, **kwargs)
+
+            return asyncio.get_running_loop().run_in_executor(self._executor, run)
+
+        return submit
 
 
 def peak_parallel(intervals):
@@ -78,11 +95,8 @@ def peak_parallel(intervals):
     return peak
 
 
-async def preprocess_requests(args, front_index, entries, images, tokenizer, pool, name,
+async def preprocess_requests(args, front_index, entries, images, renderer, name,
                               input_processor, processor, encoder, sock, batch_clock):
-    loop = asyncio.get_running_loop()
-    slots = asyncio.Semaphore(args.frontend_slots)
-
     async def prepare(index, messages):
         clock = Clock()
         start = perf_counter_ns()
@@ -95,25 +109,24 @@ async def preprocess_requests(args, front_index, entries, images, tokenizer, poo
                 max_tokens=request.max_tokens, ignore_eos=True, stop=["<never-stop>"],
                 output_kind=RequestOutputKind.DELTA, temperature=0.0,
             )
-        # A request holds one shared CPU slot from image decode through rendering.
-        # Either executor can use the slots currently free of other work.
-        async with slots:
-            image_interval = await images.decode_request(clock) if images else None
-            rendered, token_ids, render_interval, render_rows = await loop.run_in_executor(
-                pool, render_prompt, tokenizer, messages, perf_counter_ns(),
-            )
-        for key, values in render_rows.items():
-            clock.rows[key].extend(values)
-        if len(token_ids) != args.prompt_tokens:
+        image_interval = await images.decode_request(clock) if images else None
+        token = render_clock.set(clock)
+        try:
+            result = await renderer.render_chat(request)
+        finally:
+            render_clock.reset(token)
+        if isinstance(result, ErrorResponse):
+            raise ValueError(result.error.message)
+        _, (engine_input,) = result
+        if len(engine_input["prompt_token_ids"]) != args.prompt_tokens:
             raise RuntimeError(f"Unexpected prompt token count for request {index}")
         with clock.span("prefill", "input_validate_and_enqueue"):
             req = input_processor.process_inputs(
-                f"{name}-{index}", {"type": "token", "prompt_token_ids": token_ids},
-                params, ("generate",),
+                f"{name}-{index}", engine_input, params, ("generate",),
             )
             req.external_req_id = req.request_id
             req.client_index = front_index
-            processor.add_request(req, rendered)
+            processor.add_request(req, engine_input["prompt"])
         preprocess_cpu = sum(cpu for samples in clock.rows.values() for _, _, cpu in samples)
         clock.rows["prefill", "front_prefill_preprocess"].append(
             (start, perf_counter_ns(), preprocess_cpu)
@@ -122,11 +135,12 @@ async def preprocess_requests(args, front_index, entries, images, tokenizer, poo
             await sock.send_multipart(encoder.encode(req))
         for key, values in clock.rows.items():
             batch_clock.rows[key].extend(values)
-        return image_interval, render_interval
+        return image_interval
 
-    tasks = await asyncio.gather(*(prepare(index, messages) for index, messages in entries))
-    image_intervals = [image for image, _ in tasks if image is not None]
-    render_intervals = [render for _, render in tasks]
+    images_done = await asyncio.gather(*(prepare(index, messages) for index, messages in entries))
+    image_intervals = [interval for interval in images_done if interval is not None]
+    render_intervals = [(start, end) for stage in ("chat_template", "tokenize")
+                        for start, end, _ in batch_clock.rows["prefill", stage]]
     return {
         "front_ready_ns": perf_counter_ns(),
         "image_end_ns": max((end for _, end in image_intervals), default=None),
@@ -181,10 +195,10 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
     return emitted, serialized_bytes, list(first_token_ns.values()), list(finished_ns.values())
 
 
-async def run_front_round(args, front_index, entries, images, tokenizer, pool, name,
+async def run_front_round(args, front_index, entries, images, renderer, name,
                           input_processor, processor, encoder, decoder, sock, clock, batch_start_ns):
     return await asyncio.gather(
-        preprocess_requests(args, front_index, entries, images, tokenizer, pool, name,
+        preprocess_requests(args, front_index, entries, images, renderer, name,
                             input_processor, processor, encoder, sock, clock),
         stream_outputs(sock, decoder, processor, clock, batch_start_ns, len(entries)),
     )
@@ -193,7 +207,12 @@ async def run_front_round(args, front_index, entries, images, tokenizer, pool, n
 def front_worker(args, front_index, ipc_path, control):
     tokenizer = GlmRc5Tokenizer(args.model_metadata)
     cfg = config(args, skip_tokenizer_init=False)
-    input_processor = InputProcessor(cfg, renderer=HfRenderer(cfg, tokenizer))
+    renderer = MeasuredRenderer(cfg, tokenizer)
+    online_renderer = OnlineRenderer(
+        cfg.model_config, renderer, request_logger=None,
+        chat_template=None, chat_template_content_format="auto",
+    )
+    input_processor = InputProcessor(cfg, renderer=renderer)
     request_indices = range(front_index, args.concurrency, args.api_server_count)
     entries = list(zip(request_indices, workload_messages(args, tokenizer, request_indices), strict=True))
     dummy_token_id = tokenizer.encode(" hello", add_special_tokens=False)[0]
@@ -209,26 +228,25 @@ def front_worker(args, front_index, ipc_path, control):
     encoder, decoder = MsgpackEncoder(), MsgpackDecoder(EngineCoreOutputs)
     control.send((dummy_token_id, images.info if images else None))
     try:
-        render_workers = min(args.renderer_num_workers, args.frontend_slots)
-        with ThreadPoolExecutor(max_workers=render_workers, thread_name_prefix="renderer") as pool:
-            with asyncio.Runner() as runner:
-                while (job := control.recv()) is not None:
-                    if job == "encode-reference":
-                        control.send(images.measure_encode(len(entries), pool))
-                        continue
-                    name, batch_start_ns = job
-                    cpu_start = process_time_ns()
-                    clock = Clock()
-                    processor = OutputProcessor(tokenizer, log_stats=False)
-                    parallelism, responses = runner.run(run_front_round(
-                        args, front_index, entries, images, tokenizer, pool, name,
-                        input_processor, processor, encoder, decoder, sock, clock, batch_start_ns,
-                    ))
-                    emitted, serialized_bytes, first_token_ns, finished_ns = responses
-                    metrics = dict(frontend_cpu_ns=process_time_ns() - cpu_start,
-                                   host_ttft_ns=first_token_ns,
-                                   host_request_latency_ns=finished_ns)
-                    control.send((dict(clock.rows), emitted, serialized_bytes, metrics | parallelism))
+        with asyncio.Runner() as runner:
+            while (job := control.recv()) is not None:
+                if job == "encode-reference":
+                    control.send(images.measure_encode(len(entries), renderer._executor))
+                    continue
+                name, batch_start_ns = job
+                cpu_start = process_time_ns()
+                clock = Clock()
+                processor = OutputProcessor(tokenizer, log_stats=False)
+                parallelism, responses = runner.run(run_front_round(
+                    args, front_index, entries, images, online_renderer, name,
+                    input_processor, processor, encoder, decoder, sock, clock, batch_start_ns,
+                ))
+                emitted, serialized_bytes, first_token_ns, finished_ns = responses
+                metrics = dict(frontend_cpu_ns=process_time_ns() - cpu_start,
+                               host_ttft_ns=first_token_ns,
+                               host_request_latency_ns=finished_ns)
+                control.send((dict(clock.rows), emitted, serialized_bytes, metrics | parallelism))
     finally:
+        renderer.shutdown()
         sock.close()
         ctx.term()
