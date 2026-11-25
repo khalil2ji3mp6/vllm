@@ -37,6 +37,16 @@ cd vllm-host-test-kit-rc5
 
 双架构大包使用 `tar -xf vllm-host-test-kit-rc5-linux-dual.tar`。进入同名目录后，`install.sh` 自动选择本机架构。RC5 套件解包到独立目录，当前目录下创建自己的 `.venv`。
 
+## 测整机 CPU 基线
+
+在跑无卡基准前，可以先用同一版本的 Python 测单核和全核整数吞吐：
+
+```bash
+./run-cpu-stress.sh --out cpu-stress.json
+```
+
+每轮质数搜索使用相同的整数试除法，统计每秒完成的搜索轮次。单核在最多三个可用物理核上依次各测 5 秒，取吞吐中位数。全核档测 5 秒，每个工作进程固定在一个可用物理核上。有效 CPU 核数由实际进程 CPU 时间计算，可用来检查全核档是否跑满。需要同时使用 SMT 兄弟线程时追加 `--logical`。脚本可以使用套件的 Python 3.12，或 Linux 上自带的 Python 3.10 及以上版本。
+
 ## 两台跑相同负载
 
 默认 DP8 / TP1、总并发 256，每个 DP 32 个在途请求，Scheduler 同时运行至多 20 条序列。每请求 32,768 个文本输入 token、1,024 个输出 token 和 1 张 1024×1024 JPEG。预热 1 轮、测量 5 轮。前端配置按每个 DP 的核数自动计算。

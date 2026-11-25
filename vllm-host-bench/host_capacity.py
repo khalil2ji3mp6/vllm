@@ -14,7 +14,8 @@ from pathlib import Path
 from statistics import median
 from time import monotonic, sleep
 
-from bench import cpu_topology, frontend_plan
+from bench import frontend_plan
+from cpu_topology import cpu_topology
 from report import write_stage_tables
 
 STANDARD_CORE_SWEEP = (48, 96, 192)

@@ -118,7 +118,7 @@ def run(args, prompts, plans, output):
 
 def main():
     freeze_environment()
-    from bench import cpu_topology
+    from cpu_topology import cpu_topology
     from host_capacity import capacity_plan, reserve_output_dir
 
     parser = argparse.ArgumentParser(description=__doc__)
