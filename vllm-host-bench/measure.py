@@ -1,13 +1,19 @@
 """Per-occurrence wall and calling-thread CPU spans."""
-from collections import defaultdict
+import os
+import resource
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from statistics import median
 from time import perf_counter_ns, thread_time_ns
 
 
+PREFILL_RESOURCES = os.environ.get("VLLM_HOST_PREFILL_RESOURCES") == "1"
+
+
 class Clock:
     def __init__(self):
         self.rows = defaultdict(list)
+        self.resources = defaultdict(Counter) if PREFILL_RESOURCES else None
 
     @contextmanager
     def span(self, group, name):
@@ -18,6 +24,33 @@ class Clock:
         finally:
             cpu = thread_time_ns() - start_cpu
             self.rows[group, name].append((start_wall, perf_counter_ns(), cpu))
+
+    def prefill(self, name):
+        if self.resources is None:
+            return self.span("prefill", name)
+        return self.prefill_resources(name)
+
+    @contextmanager
+    def prefill_resources(self, name):
+        before = resource.getrusage(resource.RUSAGE_THREAD)
+        try:
+            with self.span("prefill", name):
+                yield
+        finally:
+            after = resource.getrusage(resource.RUSAGE_THREAD)
+            self.resources[name].update({
+                "calls": 1,
+                "user_us": (after.ru_utime - before.ru_utime) * 1e6,
+                "system_us": (after.ru_stime - before.ru_stime) * 1e6,
+                "minor_faults": after.ru_minflt - before.ru_minflt,
+                "major_faults": after.ru_majflt - before.ru_majflt,
+                "involuntary_switches": after.ru_nivcsw - before.ru_nivcsw,
+            })
+
+    def merge_resources(self, other):
+        if other.resources:
+            for name, counts in other.resources.items():
+                self.resources[name].update(counts)
 
     def move_last(self, name, group):
         self.rows[group, name].append(self.rows["pending", name].pop())

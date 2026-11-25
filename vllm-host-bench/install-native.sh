@@ -85,7 +85,15 @@ if [[ ! -x "$root/.venv/bin/python" ]]; then
   "$uv_bin" --no-config --no-cache venv --python "$python" "$root/.venv"
 fi
 "$root/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 12, 16), sys.version'
-if [[ -z "$offline" ]]; then
+lock="$root/requirements-host.lock"
+overlay="$root/../host-rc5-wheels"
+if [[ -d "$overlay" ]]; then
+  indexes+=(--find-links "$overlay")
+  lock="$root/.tools/requirements-host-serial.lock"
+  sed -e 's/^tokenizers===1.0.0rc5$/tokenizers==1.0.0rc5+host.serial1/' \
+      -e 's/^transformers==5.14.1+host.rc5$/transformers==5.14.1+host.rc5.serial1/' \
+      "$root/requirements-host.lock" > "$lock"
+elif [[ -z "$offline" ]]; then
   local_wheels="$root/.tools/wheels"
   mkdir -p "$local_wheels"
   if [[ ! -f "$local_wheels/transformers-5.14.1+host.rc5-py3-none-any.whl" ]]; then
@@ -96,7 +104,7 @@ if [[ -z "$offline" ]]; then
   indexes+=(--find-links "$local_wheels")
 fi
 "$uv_bin" --no-config --no-cache pip sync --python "$root/.venv/bin/python" "${indexes[@]}" \
-  --only-binary :all: "$root/requirements-host.lock"
+  --only-binary :all: "$lock"
 "$root/.venv/bin/python" "$root/prepare-source.py" "$root/.host-src"
 "$root/.venv/bin/python" -c 'import torch; assert torch.version.cuda is None and torch.version.hip is None; print("CPU torch", torch.__version__)'
-"$root/.venv/bin/python" -c 'from pathlib import Path; from tokenizer_rc5 import GlmRc5Tokenizer; t = GlmRc5Tokenizer(Path("model")); assert t.encode(" hello", add_special_tokens=False) == [23745]; print("GLM-5.2 tokenizer 1.0.0rc5")'
+"$root/.venv/bin/python" -c 'from pathlib import Path; from tokenizer_rc5 import GlmRc5Tokenizer; t = GlmRc5Tokenizer(Path("model")); assert t.encode(" hello", add_special_tokens=False) == [23745]; from importlib.metadata import version; print("GLM-5.2 tokenizer", version("tokenizers"))'

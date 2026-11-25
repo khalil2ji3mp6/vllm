@@ -69,7 +69,9 @@ def frontend_plan(cores, tp, concurrency, with_image, dedicated=False,
     # Leave room for the scheduler, model workers and one event loop per frontend.
     budget = 1 if dedicated else max(1, cores - tp - 1)
     if api_servers is None:
-        api_servers = max(1, min(budget // 8, concurrency // 8))
+        # Validation and request-state creation run on each frontend's event loop.
+        # Split long request batches across processes, with CPU room for their pools.
+        api_servers = max(1, min(budget // 4, (concurrency + 15) // 16))
     per_frontend = (concurrency + api_servers - 1) // api_servers
     pool_budget = min(per_frontend, max(1, (budget - api_servers) // api_servers))
     if not with_image:
@@ -256,6 +258,10 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
         rows, tokens, size, metrics = get(front, args.timeout)
         for key, values in rows.items():
             front_rows[key].extend(values)
+        if "prefill_resources" in metrics:
+            totals = front_metrics.setdefault("prefill_resources", {})
+            for stage, counts_by_resource in metrics["prefill_resources"].items():
+                totals.setdefault(stage, Counter()).update(counts_by_resource)
         front_tokens += tokens
         serialized_bytes += size
         front_metrics["frontend_cpu_ns"] += metrics["frontend_cpu_ns"]

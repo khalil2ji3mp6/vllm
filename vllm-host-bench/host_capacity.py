@@ -361,6 +361,9 @@ def main():
         trial.out = scratch / f"cores-{cores}"
         trial.out.mkdir()
         summaries = run_capacity(trial, plan, root)
+        if args.keep_diagnostics:
+            from stage_profile import write_profile
+            write_profile(summaries, trial.out)
         heading = (f"{cores} 核（µs/请求）" if args.core_sweep else "摊销墙钟（µs/请求）")
         columns.append((heading, summaries))
     markdown = write_stage_tables(columns, out)
@@ -416,6 +419,7 @@ def run_capacity(args, plan, root):
                             str(frontend["media_loading_threads"])])
             with directory.with_suffix(".log").open("w") as log:
                 processes.append(subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                                  env=os.environ | {"VLLM_HOST_PREFILL_RESOURCES": str(int(args.keep_diagnostics))},
                                                   start_new_session=True))
         for index, path in enumerate(round_dirs):
             await_replicas(processes, [path / f"ready-{i}" for i in range(len(processes))],

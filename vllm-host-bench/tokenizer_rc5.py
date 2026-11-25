@@ -10,7 +10,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 class GlmRc5Tokenizer(TokenizersBackend):
     def __init__(self, model_dir):
         installed = version("tokenizers")
-        if installed != "1.0.0rc5":
+        if installed not in ("1.0.0rc5", "1.0.0rc5+host.serial1"):
             raise RuntimeError(f"Expected tokenizers 1.0.0rc5, found {installed}")
         self._tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json")).compile()
         settings = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))

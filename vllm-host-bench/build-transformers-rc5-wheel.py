@@ -3,7 +3,6 @@ import base64
 import csv
 import hashlib
 import io
-import sys
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -14,9 +13,11 @@ def replace_once(data, before, after):
     return data.replace(before, after, 1)
 
 
-def repack(source, output_dir):
+def repack(source, output_dir, serial=False):
     upstream = "transformers-5.14.1"
-    local = upstream + "+host.rc5"
+    suffix = "+host.rc5.serial1" if serial else "+host.rc5"
+    local = upstream + suffix
+    dependency = b"tokenizers==1.0.0rc5" + (b"+host.serial1" if serial else b"")
     if source.name != f"{upstream}-py3-none-any.whl":
         raise ValueError("Expected the pinned upstream Transformers 5.14.1 wheel")
     output = output_dir / f"{local}-py3-none-any.whl"
@@ -30,13 +31,13 @@ def repack(source, output_dir):
             data = original.read(path)
             path = path.replace(upstream + ".dist-info/", local + ".dist-info/", 1)
             if path.endswith(".dist-info/METADATA"):
-                data = replace_once(data, b"Version: 5.14.1\n", b"Version: 5.14.1+host.rc5\n")
+                data = replace_once(data, b"Version: 5.14.1\n", (f"Version: 5.14.1{suffix}\n").encode())
                 data = replace_once(data, b"Requires-Dist: tokenizers<=0.23.0,>=0.22.0\n",
-                                    b"Requires-Dist: tokenizers==1.0.0rc5\n")
+                                    b"Requires-Dist: " + dependency + b"\n")
             elif path == "transformers/__init__.py":
-                data = replace_once(data, b'__version__ = "5.14.1"', b'__version__ = "5.14.1+host.rc5"')
+                data = replace_once(data, b'__version__ = "5.14.1"', f'__version__ = "5.14.1{suffix}"'.encode())
             elif path == "transformers/dependency_versions_table.py":
-                data = replace_once(data, b"tokenizers>=0.22.0,<=0.23.0", b"tokenizers==1.0.0rc5")
+                data = replace_once(data, b"tokenizers>=0.22.0,<=0.23.0", dependency)
             elif path == "transformers/tokenization_utils_tokenizers.py":
                 trainers_import = b"from tokenizers.trainers import BpeTrainer, UnigramTrainer, WordLevelTrainer, WordPieceTrainer\n"
                 trainer_map = (b'MODEL_TO_TRAINER_MAPPING = {\n    "BPE": BpeTrainer,\n'
@@ -60,4 +61,10 @@ def repack(source, output_dir):
 
 
 if __name__ == "__main__":
-    print(repack(Path(sys.argv[1]), Path(sys.argv[2])))
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("wheel", type=Path)
+    parser.add_argument("out", type=Path)
+    parser.add_argument("--serial", action="store_true")
+    args = parser.parse_args()
+    print(repack(args.wheel, args.out, args.serial))

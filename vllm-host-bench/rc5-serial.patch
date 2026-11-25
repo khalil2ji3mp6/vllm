@@ -1,0 +1,18 @@
+--- a/tokenizers/tk-encode/src/tokenizer/pipeline/parallel.rs
++++ b/tokenizers/tk-encode/src/tokenizer/pipeline/parallel.rs
+@@ -6 +6 @@
+-use crate::parallelism::pool;
++use crate::parallelism::{get_parallelism, pool};
+@@ -443 +443 @@
+-    if inputs.size_bytes() < PARALLEL_MIN_BYTES {
++    if !get_parallelism() || inputs.size_bytes() < PARALLEL_MIN_BYTES {
+--- a/bindings/python/Cargo.toml
++++ b/bindings/python/Cargo.toml
+@@ -3 +3 @@
+-version = "1.0.0-rc.5"
++version = "1.0.0-rc.5+host.serial1"
+--- a/bindings/python/Cargo.lock
++++ b/bindings/python/Cargo.lock
+@@ -1201 +1201 @@
+-version = "1.0.0-rc.5"
++version = "1.0.0-rc.5+host.serial1"

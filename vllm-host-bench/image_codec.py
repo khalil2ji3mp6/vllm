@@ -20,9 +20,9 @@ class TimedImageMediaIO(ImageMediaIO):
 
     def load_base64(self, media_type, data):
         start = perf_counter_ns()
-        with self.clock.span("prefill", "image_base64_decode"):
+        with self.clock.prefill("image_base64_decode"):
             image_bytes = pybase64.b64decode(data, validate=True)
-        with self.clock.span("prefill", "image_decode_rgb"):
+        with self.clock.prefill("image_decode_rgb"):
             result = self.load_bytes(image_bytes)
         self.decode_interval = (start, perf_counter_ns())
         return result
@@ -72,4 +72,5 @@ class ImageCodec:
                 raise RuntimeError("vLLM image decode returned unexpected dimensions or mode")
         for key, values in loader.clock.rows.items():
             clock.rows[key].extend(values)
+        clock.merge_resources(loader.clock)
         return loader.decode_interval

@@ -35,9 +35,9 @@ CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NU
 
 请求经上游 `OnlineRenderer.render_chat`、`HfRenderer.render_chat_async` 进入 vLLM 自带的执行器和 tokenizer 副本池。模板使用 Transformers 的 GLM-5.2 逻辑，分词使用 RC5 的单文本 `encode`，与分词单测的底层入口一致。流式反分词保留 vLLM 的输出处理，底层使用 RC5 `DecodeStream`。图片复用 vLLM 的媒体线程池。Schema、模型输入校验、反分词和序列化由各个前端的主线程完成。
 
-脚本按该 DP 的物理核、TP 数和在途请求数计算前端进程数。为 EngineCore、worker 和每个 API 主线程预留预算后，其余核用于计算各前端的默认线程数。图片和文本使用各自的线程池，两个池可以同时执行不同请求，共享本 DP 的 CPU 掩码。
+每 DP 先为 EngineCore 和 TP worker 预留 `1 + TP` 核的预算。自动配置按每 16 个在途请求配置一个前端进程（向上取整），同时每个进程至少分到 4 核预算。预算不足时仍启动一个前端。各前端各有一个 uvloop 事件循环，在接收请求前调用与 vLLM API 服务相同的 `freeze_gc_heap()`。图片和文本使用各自的线程池，两个池可以同时执行不同请求，共享本 DP 的 CPU 掩码。
 
-标准负载下，128 核每 DP 有 1 个前端、13 个渲染线程。192 核每 DP 有 2 个前端，每个前端有 10 个渲染线程。分词单次调用保持一个任务，`TOKENIZERS_PARALLELISM=false`。Decode 使用 vLLM 真实 CPU Scheduler 的同步模式，worker 仍是 Host 元数据实现。并行客户端编码只跑独立参考轮。
+标准 DP8、每 DP 并发 32 时，96、128、192 核均为每 DP 两个前端，每个前端的渲染线程数依次是 4、6、10，媒体线程池大小与渲染线程池相同。48 核时每 DP 一个前端，每个池 3 个线程。增加前端进程可以让多个请求同时执行主线程上的校验和建状态。本地 RC5 修正版在 `TOKENIZERS_PARALLELISM=false` 时让一次分词在调用线程内完成。原版长文本路径仍可能启动自己的线程池。Decode 使用 vLLM 真实 CPU Scheduler 的同步模式，worker 仍是 Host 元数据实现。并行客户端编码只跑独立参考轮。
 
 ### Prefill
 
@@ -115,3 +115,38 @@ cd vllm-host-bench
 有网时可运行 `./install-native.sh`，按需要设置 `HTTPS_PROXY`、`HTTP_PROXY`、`UV_SYSTEM_CERTS=true`。如需自行制备对应架构的离线包，用 Python 3 和 pip 运行 `./prepare-offline.sh x86_64 ../vllm-host-offline-x86_64`，ARM 替换架构即可。
 
 固定 vLLM core 提交 `ced6857afa0ea7b2e3f0846a62e1394e90f15607`。随包的 `reference-glm52-950dt-tp8.sh` 保留 GLM-5.2 的真实 8 卡 TP8 配方供核对。基准的 DP8 / TP1 仅复现 8 个独立 Host 路径，生产使用的 DP/TP/EP 配置需按设备和模型部署方案确认。[vLLM 数据并行部署](https://docs.vllm.ai/en/v0.30.0/serving/data_parallel_deployment/) · [vLLM Ascend CPU 绑核](https://docs.vllm.ai/projects/ascend/en/v0.30.0/user_guide/feature_guide/cpu_binding.html) · [GLM-5.2 部署配方](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/GLM5.2.html)
+
+## 单流程扩核、业务占核和双机对照
+
+在已安装的离线套件根目录运行。双机使用同一套件与相同命令。正式单测默认比较 1 个物理核与当前 cpuset 内全部物理核。整网沿用 DP8 / TP1、每 DP 并发 32、32K 文本、1024 输出和一张 1024² JPEG。各测试串行执行。
+
+```bash
+./run-stages.sh --out stages
+./run.sh --keep-diagnostics --out host-auto
+
+# 定位时可以只使用 1、48、96 核
+./run-stages.sh --core-sweep 1 48 96 --out stages-diag
+./run.sh --core-sweep 48 96 --keep-diagnostics --out host-diag
+
+# A 为 x86、B 为 ARM。用两份单测 JSON 输出 B/A 吞吐比。
+./run-stages.sh --compare x86/stages.json arm/stages.json
+```
+
+单测在 `stages.md` 给出吞吐和实际占核，`stages.json` 包含采样轮、各核的亲和掩码、输入指纹、单位工作 CPU 时间、内核态时间、缺页和时钟频率采样。Linux 允许访问 PMU 时还记录每单位操作的用户态周期、指令数和通用 cache-misses。内核不支持或限制读数时记录错误原因。各架构的通用缓存事件可能映射到不同硬件层级。CPU 比较先看同架构扩核前后的变化。
+
+| 业务表行组 | DP8 / TP1 的执行者和并行边界 | 单流程用例 |
+|---|---|---|
+| 校验、建状态 | 每前端一个主线程。同进程的 Python 片段轮流执行。128/192 核自动配置均为 16 个前端主线程 | Schema 与采样参数、输入校验与建状态分别测量。建状态每次用空的 OutputProcessor |
+| Chat Template、Tokenizer | 每前端一个 renderer 池。128 核共 16×6 个槽位，192 核共 16×10 个槽位。每条请求按模板、分词顺序执行。Python 对象构造受每进程 GIL 约束 | 模板、完整 encode 到 list、原生 encode、已有 Encoding 导出 32K IDs |
+| 图片接入／编解码 | 同一批前端另有媒体池，槽位与 renderer 相同。两个池共享每 DP 的物理核。不同请求可重叠 | Base64、上游 ImageMediaIO.load_bytes、仅 JPEG 像素解压、已解码 RGB 复制、独立客户端编码 |
+| IPC、入队 | 前端发送，EngineCore 收包、建请求和计算块哈希。每 DP 一个引擎消费者 | 32K 请求 Msgpack 往返编解码、两个进程间的实际 ZeroMQ PAIR 发送和 ACK。入队和块哈希计入独立引擎用例 |
+| 调度、预算、前缀匹配、KV 分配／扩展／释放、更新／停止 | 每个 EngineCore 同步推进一个 Scheduler，全机 8 条调度流水。单 DP 增核可减轻争抢。一个时间步依赖前一个时间步的结果 | 每条独立流水使用真实 Scheduler，32K 完整处理、输出 1024、每请求独立 cache salt、结束释放。单测每引擎一个在途请求。服务同时最多 20 条活动序列每 DP |
+| worker 输入与块表准备 | 每 DP 一个 TP1 worker，主线程准备本步输入。全机 8 个 worker。与前端、其他 DP 的 worker 可重叠 | 重放真实首个 16384-token 调度块和单序列 Decode 步的 CPU 元数据；Core↔worker 单测走真实共享内存队列、返回固定结果 |
+| 增量反分词、停止串、流式序列化 | 在各前端主线程按请求有序处理。并行度受前端进程数和输出到达节奏限制 | 真实 OutputProcessor 接收 1024 个逐 token 更新、执行停止判断和最终释放，共用整网的序列化函数 |
+| 设备算子、H2D/D2H、视觉模型、PD、KV 传输 | 无卡场景跳过。网络响应只计本地响应序列化 | 保持业务表中的空值 |
+
+逐核进程用例为每个选中物理核提供独立解释器和持续工作，测每个阶段能达到的吞吐。线程用例把同一组物理核分给至多 8 个进程，每核一个固定线程，用于复现共享解释器的影响。传输用例至多 8 对，两端共享各自的 DP 核组；1 核时两端在同一核轮流运行。它们分别回答独立容量、线程扩展和跨进程往返三个问题。单个资源争用阶段可能在高核数时吞吐持平甚至下降。独立内存对照每次读取和写入各 32 MiB，结果可乘 64 MiB 得逻辑带宽。
+
+保留诊断时，每个 `.runs/cores-N/core-usage.md` 给出真实业务各组每完成请求的调用线程 CPU 时间、整轮平均占用物理核当量，以及能从原始区间恢复出的组内活跃期间平均占核。后者将 CPU 时间除以各 DP 该组墙钟区间的并集。文件末尾列出六个同步前处理打点的用户态／内核态、缺页与调用数。`prefill-resources.json` 保留总计。异步等回复仍在业务时延表中。没有这些新打点的历史结果也可使用 `.venv/bin/python stage_profile.py <旧测试/.runs/cores-N>` 恢复已有的占核指标。
+
+RC5 原版和本地修正版的发行标识分别为 `1.0.0rc5`、`1.0.0rc5+host.serial1`。修正版使长文本分词路径遵守基准已经设置的 `TOKENIZERS_PARALLELISM=false`，请求之间仍由 vLLM renderer 执行器并行。匹配的 Transformers wheel 仅调整本套件已有的版本适配。完整双架构包运行一次 `./install.sh` 即自动选用本机修正版。已安装套件覆盖更新文件后运行 `./install-rc5-serial.sh`，从随包的 `host-rc5-wheels/` 安装本机对应的离线轮子。构建机可用 Rust、两个 Linux GNU targets、maturin 和 Zig 执行 `vllm-host-bench/build-serial-wheels.sh host-rc5-wheels` 重建。两边使用同一种构建进行横向比较。

@@ -29,7 +29,7 @@ sentencepiece==0.2.3
 setuptools==80.10.2
 six==1.17.0
 tiktoken==0.14.0
-tokenizers==1.0.0rc5
+tokenizers===1.0.0rc5
 torch==2.10.0+cpu
 tqdm==4.70.1
 transformers==5.14.1+host.rc5

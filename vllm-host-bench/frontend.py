@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from time import perf_counter_ns, process_time_ns
 
 import msgspec
+import uvloop
 import zmq
 import zmq.asyncio
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -11,6 +12,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.renderers.hf import HfRenderer, safe_apply_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -78,7 +80,7 @@ class MeasuredRenderer(HfRenderer):
 
             def run():
                 clock.rows["prefill", "renderer_queue_wait"].append((submitted, perf_counter_ns(), 0))
-                with clock.span("prefill", stage):
+                with clock.prefill(stage):
                     return function(*args, **kwargs)
 
             return asyncio.get_running_loop().run_in_executor(self._executor, run)
@@ -100,7 +102,7 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
     async def prepare(index, messages):
         clock = Clock()
         start = perf_counter_ns()
-        with clock.span("prefill", "request_validate"):
+        with clock.prefill("request_validate"):
             payload = msgspec.json.encode(dict(
                 model="glm", messages=messages, max_tokens=args.new_tokens, stream=True,
             ))
@@ -120,7 +122,7 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
         _, (engine_input,) = result
         if len(engine_input["prompt_token_ids"]) != args.prompt_tokens:
             raise RuntimeError(f"Unexpected prompt token count for request {index}")
-        with clock.span("prefill", "input_validate_and_enqueue"):
+        with clock.prefill("input_validate_and_enqueue"):
             req = input_processor.process_inputs(
                 f"{name}-{index}", engine_input, params, ("generate",),
             )
@@ -135,6 +137,7 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
             await sock.send_multipart(encoder.encode(req))
         for key, values in clock.rows.items():
             batch_clock.rows[key].extend(values)
+        batch_clock.merge_resources(clock)
         return image_interval
 
     images_done = await asyncio.gather(*(prepare(index, messages) for index, messages in entries))
@@ -152,6 +155,20 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
             for render_start, render_end in render_intervals
         ),
     }
+
+
+def serialize_chunks(items):
+    emitted = serialized_bytes = 0
+    for item in items:
+        for choice in item.outputs:
+            emitted += len(choice.token_ids)
+            chunk = msgspec.json.encode({
+                "id": item.request_id, "object": "chat.completion.chunk",
+                "choices": [{"index": choice.index, "delta": {"content": choice.text},
+                             "finish_reason": choice.finish_reason}],
+            })
+            serialized_bytes += len(b"data: " + chunk + b"\n\n")
+    return emitted, serialized_bytes
 
 
 async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, request_count):
@@ -173,15 +190,9 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
             if output.reqs_to_abort:
                 raise RuntimeError("Unexpected stop-string hit in fixed workload")
             with clock.span(phase, "serialize_stream_chunks"):
-                for item in output.request_outputs:
-                    for choice in item.outputs:
-                        emitted += len(choice.token_ids)
-                        chunk = msgspec.json.encode({
-                            "id": item.request_id, "object": "chat.completion.chunk",
-                            "choices": [{"index": choice.index, "delta": {"content": choice.text},
-                                         "finish_reason": choice.finish_reason}],
-                        })
-                        serialized_bytes += len(b"data: " + chunk + b"\n\n")
+                count, size = serialize_chunks(output.request_outputs)
+                emitted += count
+                serialized_bytes += size
         now = perf_counter_ns() - batch_start_ns
         for item in output.request_outputs:
             for choice in item.outputs:
@@ -226,9 +237,11 @@ def front_worker(args, front_index, ipc_path, control):
     sock.setsockopt(zmq.LINGER, 0)
     sock.connect(ipc_path)
     encoder, decoder = MsgpackEncoder(), MsgpackDecoder(EngineCoreOutputs)
+    # Match the API server lifespan before accepting timed requests.
+    freeze_gc_heap()
     control.send((dummy_token_id, images.info if images else None))
     try:
-        with asyncio.Runner() as runner:
+        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
             while (job := control.recv()) is not None:
                 if job == "encode-reference":
                     control.send(images.measure_encode(len(entries), renderer._executor))
@@ -245,6 +258,8 @@ def front_worker(args, front_index, ipc_path, control):
                 metrics = dict(frontend_cpu_ns=process_time_ns() - cpu_start,
                                host_ttft_ns=first_token_ns,
                                host_request_latency_ns=finished_ns)
+                if clock.resources:
+                    metrics["prefill_resources"] = dict(clock.resources)
                 control.send((dict(clock.rows), emitted, serialized_bytes, metrics | parallelism))
     finally:
         renderer.shutdown()
