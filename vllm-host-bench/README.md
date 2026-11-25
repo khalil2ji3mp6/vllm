@@ -16,14 +16,14 @@
 ./run.sh --core-sweep --out auto-core-sweep
 
 # 定位问题时只跑两个低核数档位
-./run.sh --core-sweep 48 96 --out auto-check
+./run.sh --core-sweep 48 96 --keep-diagnostics --out auto-check
 ```
 
 可追加 `--plan-only` 查看计划。无 `run.sh` 时，在已安装的 `vllm-host-bench` 目录用 `.venv/bin/python host_capacity.py` 加同样的参数。
 
 CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NUMA 节点，DP 之间的核组互不重叠。给定整机核数时，每个 DP 获得相同的物理核数。每 DP 有一个前端且 `--cores-per-replica` 等于 `TP + 2` 时，三个角色各固定在一核。默认全核及其他核数使用共享核组。已有输出目录会自动使用数字后缀。
 
-成功后输出目录只有 `coverage.md`、`prefill.csv` 和 `decode.csv`，内容为两张阶段表。各档使用相同工作负载和预热设置。每轮将同一行的子项和 8 个 DP 的绝对墙钟区间合并，重叠时间只算一次。跨轮累加后除以完成的请求数，得到每请求摊销墙钟，单位 µs/请求。默认 5 轮。`—` 表示未执行或无样本。父阶段和子阶段可能覆盖同一段工作。图片编码作为独立的同步参考轮，在所有 Host 轮完成后测量，同样按完成请求数归一化。失败时保留本次测试输出目录中的 `.runs` 日志。
+默认成功后输出目录包含 `coverage.md`、`prefill.csv` 和 `decode.csv`，内容为两张阶段表。各档使用相同工作负载和预热设置。每轮将同一行的子项和 8 个 DP 的绝对墙钟区间合并，重叠时间只算一次。跨轮累加后除以完成的请求数，得到每请求摊销墙钟，单位 µs/请求。默认 5 轮。`—` 表示未执行或无样本。父阶段和子阶段可能覆盖同一段工作。图片编码作为独立的同步参考轮，在所有 Host 轮完成后测量，同样按完成请求数归一化。失败时保留本次测试输出目录中的 `.runs` 日志。追加 `--keep-diagnostics` 时，成功后也保留 `.runs/cores-*/host-rounds.csv` 和 `replica-*/summary.json` 等原始统计，终端仍输出两张阶段表。
 
 默认每请求使用随包的同一张样图。可以用 `--image-file` 替换为本地 JPEG 或 PNG，用 `--request-file` 替换文本，或者用 `--text-only` 跳过图片。双机对照使用相同的输入文件。请求 JSONL 每行一个 OpenAI 样式的 `messages` 数组，行数等于每副本并发，应用 GLM 模板后必须满足指定的文本 token 长度。
 

@@ -251,6 +251,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--keep-diagnostics", action="store_true",
+                        help="Keep per-round and per-DP data under the output directory")
     parser.add_argument("--compare", type=Path, nargs=2, metavar=("FIRST_JSON", "SECOND_JSON"),
                         help="Check two workload profiles and print comparable host metrics")
     parser.add_argument("--replicas", "--dp", type=int, default=8, help="Host DP replicas (default 8)")
@@ -361,7 +363,8 @@ def main():
         heading = (f"{cores} 核（µs/请求）" if args.core_sweep else "摊销墙钟（µs/请求）")
         columns.append((heading, summaries))
     markdown = write_stage_tables(columns, out)
-    shutil.rmtree(scratch)
+    if not args.keep_diagnostics:
+        shutil.rmtree(scratch)
     print(markdown)
 
 

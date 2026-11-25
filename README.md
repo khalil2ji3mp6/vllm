@@ -54,7 +54,9 @@ cd vllm-host-test-kit-rc5
 
 机器可用核数低于所需档位时，用 `--core-sweep 48 96` 指定适用档位。各档核数必须是 DP 数的整数倍。追加 `--plan-only` 可查看核组和自动分配。
 
-输出目录只有 `coverage.md`、`prefill.csv`、`decode.csv` 两张阶段表的 Markdown 和 CSV。每轮合并该阶段在 8 个 DP 上的墙钟区间，重叠时间只算一次。用实测轮的总墙钟除以完成请求数。每行一个数，单位 µs/请求。卡上及未执行的阶段显示 `—`。重复使用已有的 `--out` 时，脚本自动创建带数字后缀的目录。
+默认输出目录包含 `coverage.md`、`prefill.csv`、`decode.csv` 两张阶段表的 Markdown 和 CSV。每轮合并该阶段在 8 个 DP 上的墙钟区间，重叠时间只算一次。用实测轮的总墙钟除以完成请求数。每行一个数，单位 µs/请求。卡上及未执行的阶段显示 `—`。重复使用已有的 `--out` 时，脚本自动创建带数字后缀的目录。
+
+定位两台机器的性能差距时，可运行 `./run.sh --core-sweep 48 96 --keep-diagnostics --out host-diag`，将各档整机轮次统计和每个 DP 的原始计时保留在输出目录的 `.runs` 下。
 
 ## 单测 tokenizer
 
