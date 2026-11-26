@@ -321,6 +321,7 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
     if len(generated) != args.concurrency or scheduled_decode != expected_decode:
         raise RuntimeError("Request-stage weights disagree with emitted token counts")
     metrics = dict(counts) | front_metrics
+    metrics["frontend_elapsed_version"] = 2
     metrics["request_stage_ns"] = request_times(
         clock.rows, front_rows, [rows for rows, _, _ in worker_results],
         step_weights, send_weights, output_times,

@@ -209,6 +209,10 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
     # Retained pre-group summaries can still be rendered using their original schema.
     recorded = ["request_stage_ns" in r for _, replicas in columns for s in replicas
                 for r in s["workload"][case]]
+    versions = {r.get("frontend_elapsed_version", 1) for _, replicas in columns
+                for s in replicas for r in s["workload"][case]}
+    if len(versions) != 1:
+        raise ValueError("Frontend timing boundaries differ between runs")
     weighted = all(recorded)
     if any(recorded) != weighted:
         raise ValueError("Cannot compare request-weighted and historical measurements")

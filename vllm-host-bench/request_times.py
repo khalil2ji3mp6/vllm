@@ -18,8 +18,8 @@ def charge(totals, group, spans, weights):
 def request_times(engine, front, workers, steps, sends, frontend_times):
     totals = {phase: Counter(frontend_times[phase]) for phase in ("Prefill", "Decode")}
     for group, stages in (
-        (TEXT, ("request_validate", "chat_template", "tokenize", "input_validate_and_enqueue")),
-        (IMAGE, ("image_base64_decode", "image_decode_rgb")),
+        (TEXT, ("request_text_elapsed",)),
+        (IMAGE, ("request_image_elapsed",)),
         (IPC, ("front_engine_encode_send",)),
     ):
         for stage in stages:

@@ -102,6 +102,9 @@ def peak_parallel(intervals):
 
 async def preprocess_requests(args, front_index, entries, images, renderer, name,
                               input_processor, processor, encoder, sock, batch_clock):
+    # All entries are ready when this frontend submits its batch to the event loop.
+    submitted = perf_counter_ns()
+
     async def prepare(index, messages):
         clock = Clock()
         start = perf_counter_ns()
@@ -114,7 +117,9 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
                 max_tokens=request.max_tokens, ignore_eos=True, stop=["<never-stop>"],
                 output_kind=RequestOutputKind.DELTA, temperature=0.0,
             )
+        validated = perf_counter_ns()
         image_interval = await images.decode_request(clock) if images else None
+        media_ready = perf_counter_ns() if images else validated
         token = render_clock.set(clock)
         try:
             result = await renderer.render_chat(request)
@@ -132,6 +137,12 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
             req.external_req_id = req.request_id
             req.client_index = front_index
             processor.add_request(req, engine_input["prompt"])
+        ready = perf_counter_ns()
+        clock.rows["prefill", "request_text_elapsed"].extend(
+            [(submitted, validated, 0), (media_ready, ready, 0)]
+        )
+        if images:
+            clock.rows["prefill", "request_image_elapsed"].append((validated, media_ready, 0))
         preprocess_cpu = sum(cpu for samples in clock.rows.values() for _, _, cpu in samples)
         clock.rows["prefill", "front_prefill_preprocess"].append(
             (start, perf_counter_ns(), preprocess_cpu)
