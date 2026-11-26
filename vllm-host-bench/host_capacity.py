@@ -139,7 +139,10 @@ def summarize_capacity(args, plan, summaries, cpu_busy):
     by_replica = []
     for replica, summary in zip(plan["replicas"], summaries, strict=True):
         hw = summary["hardware"]
-        masks = [hw["engine_affinity"], hw["frontend_affinity"], *hw["worker_affinity"].values()]
+        front_masks = hw["frontend_affinities"]
+        if len(front_masks) != replica["frontend"]["api_server_count"]:
+            raise RuntimeError("Missing observed frontend CPU masks")
+        masks = [hw["engine_affinity"], *front_masks, *hw["worker_affinity"].values()]
         if replica["affinity"] == "compact":
             matches = sorted(sum(masks, [])) == sorted(replica["cpus"])
         else:
@@ -402,6 +405,7 @@ def run_capacity(args, plan, root):
             i = replica["replica"]
             directory = out / f"replica-{i:02d}"
             frontend = replica["frontend"]
+            # Set the outer DP mask before Python imports or spawns any role or thread pool.
             cmd = ["taskset", "-c", ",".join(map(str, replica["cpus"])),
                    str(root / "run-native.sh"), "--cases", "cold", "--affinity", replica["affinity"],
                    "--tp", str(args.tp), "--concurrency", str(args.concurrency_per_replica),

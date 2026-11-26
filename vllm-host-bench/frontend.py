@@ -1,5 +1,6 @@
 """Local frontend with per-request image and text preprocessing."""
 import asyncio
+import os
 from contextvars import ContextVar
 from time import perf_counter_ns, process_time_ns
 
@@ -203,6 +204,7 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
         await asyncio.sleep(0)
     if len(first_token_ns) != request_count or len(finished_ns) != request_count:
         raise RuntimeError("Missing first token or completion timestamp")
+    # Batch start to first token includes admission delays behind already decoding requests.
     for rid, first in first_token_ns.items():
         clock.rows["prefill", "request_phase_lifetime"].append((batch_start_ns, batch_start_ns + first, 0))
         clock.rows["decode", "request_phase_lifetime"].append((batch_start_ns + first, batch_start_ns + finished_ns[rid], 0))
@@ -227,6 +229,7 @@ def front_worker(args, front_index, ipc_path, control):
         chat_template=None, chat_template_content_format="auto",
     )
     input_processor = InputProcessor(cfg, renderer=renderer)
+    # Static request sharding: each frontend owns these requests through final serialization.
     request_indices = range(front_index, args.concurrency, args.api_server_count)
     entries = list(zip(request_indices, workload_messages(args, tokenizer, request_indices), strict=True))
     dummy_token_id = tokenizer.encode(" hello", add_special_tokens=False)[0]
@@ -242,7 +245,8 @@ def front_worker(args, front_index, ipc_path, control):
     encoder, decoder = MsgpackEncoder(), MsgpackDecoder(EngineCoreOutputs)
     # Match the API server lifespan before accepting timed requests.
     freeze_gc_heap()
-    control.send((dummy_token_id, images.info if images else None))
+    # Read the mask in the spawned event-loop process, after its pinning and initialization.
+    control.send((dummy_token_id, images.info if images else None, sorted(os.sched_getaffinity(0))))
     try:
         with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
             while (job := control.recv()) is not None:

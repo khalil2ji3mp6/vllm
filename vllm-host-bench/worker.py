@@ -99,6 +99,7 @@ def run_worker(args, rank, handle, control, token_id):
         if item[0] == "end":
             control.send((dict(clock.rows), process_time_ns() - cpu_start, perf_counter_ns()))
             continue
+        # Consume one scheduled batch per message; extra CPUs do not create extra TP1 workers.
         phase, output, sample = item
         clock.move_last("worker_dequeue_wait_and_deserialize", phase)
         with clock.span(phase, "worker_prepare_cpu"):

@@ -67,6 +67,7 @@ def affinity(args):
 def frontend_plan(cores, tp, concurrency, with_image, dedicated=False,
                   api_servers=None, renderer_workers=None, media_threads=None):
     # Leave room for the scheduler, model workers and one event loop per frontend.
+    # Budgets size pools; in inherit mode neither the roles nor pool threads own dedicated CPUs.
     budget = 1 if dedicated else max(1, cores - tp - 1)
     if api_servers is None:
         # Validation and request-state creation run on each frontend's event loop.
@@ -230,6 +231,7 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
             counts[phase + "_steps"] += 1
             counts["scheduled_prefill_tokens"] += prefill
             counts["scheduled_decode_tokens"] += decode
+            # One outstanding scheduler step per replica. The next step needs this reply.
             with clock.span(phase, "engine_worker_enqueue"):
                 tx.enqueue((phase, output, sample), timeout=args.timeout)
             with clock.span(phase, "engine_worker_reply_wait"):
@@ -307,7 +309,7 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                      **{f"worker{rank}": rows for rank, (rows, _, _) in enumerate(worker_results)}}
 
 
-def write_report(args, samples, timed_rounds, topology, masks, image):
+def write_report(args, samples, timed_rounds, topology, masks, frontend_masks, image):
     import vllm
     from report import capture_stage_intervals, write_coverage
 
@@ -338,8 +340,9 @@ def write_report(args, samples, timed_rounds, topology, masks, image):
                                Path("/proc/cpuinfo").read_text().splitlines()
                                if line.startswith(("model name", "CPU part"))), None),
             "affinity_before_binding": topology, "worker_affinity": masks,
-            "engine_affinity": args.engine_cpus or topology["allowed_cpus"],
-            "frontend_affinity": args.front_cpus or topology["allowed_cpus"],
+            "engine_affinity": sorted(os.sched_getaffinity(0)),
+            "frontend_affinity": frontend_masks[0],  # Preserve the original single-mask field.
+            "frontend_affinities": frontend_masks,
         },
         "versions": {name: importlib.metadata.version(name)
                      for name in ("torch", "numpy", "transformers", "tokenizers", "pyzmq", "msgspec",
@@ -419,8 +422,9 @@ def run(args):
                 children.append(front_proc)
                 fronts.append(front)
             frontend_info = [get(front, args.timeout) for front in fronts]
-            token_id, image = frontend_info[0]
-            for front_token, front_image in frontend_info:
+            token_id, image, _ = frontend_info[0]
+            frontend_masks = [mask for _, _, mask in frontend_info]
+            for front_token, front_image, _ in frontend_info:
                 if front_token != token_id or front_image != image:
                     raise RuntimeError("Frontends disagreed on the synthetic output token or fixture")
             if image is not None:
@@ -475,7 +479,7 @@ def run(args):
                             (args.round_gate / name / f"done-{args.replica_id}").touch()
             for front in fronts:
                 front.send(None)
-            write_report(args, samples, timed_rounds, topology, masks, image)
+            write_report(args, samples, timed_rounds, topology, masks, frontend_masks, image)
             wait_for_shutdown(children, args.timeout)
             if args.round_gate is None:
                 print(f"Prefill and Decode tables saved to {args.out / 'coverage.md'}", flush=True)

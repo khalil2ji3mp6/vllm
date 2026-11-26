@@ -121,6 +121,7 @@ def capture_stage_intervals(processes):
     for process, phases in processes.items():
         names = (process, "worker") if process.startswith("worker") else (process,)
         for (phase, stage), samples in phases.items():
+            # A mixed scheduling step has one shared wall interval; attribute it once.
             if phase in ("prefill", "mixed"):
                 section = "Prefill"
             elif phase == "decode":
@@ -224,6 +225,7 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
                 samples = []
                 seen = False
                 for i, n in enumerate(counts):
+                    # Overlapping work on different DPs counts once toward host wall time.
                     spans = merge_intervals(span for s in replicas for span in
                                             s["stage_intervals"][case][i][phase][group])
                     seen |= bool(spans)

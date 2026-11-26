@@ -67,6 +67,7 @@ def current_mhz(cpu):
 
 
 def lane(cpu, cases, args, gate, deadline, directory):
+    # A saturated microbenchmark lane differs from a service role sharing the whole DP mask.
     os.sched_setaffinity(0, {cpu})
     counters = Counters()
     try:
