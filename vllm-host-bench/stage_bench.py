@@ -336,7 +336,7 @@ def main():
     parser.add_argument("--keep-diagnostics", action="store_true")
     args = parser.parse_args()
     explicit = args.stages is not None
-    args.stages = args.stages or (list(CASES) if args.keep_diagnostics else list(MICRO))
+    args.stages = args.stages or ["text_request", "image_request"]
     if args.compare:
         try:
             compare(args.compare)
@@ -468,8 +468,9 @@ def main():
             + ["扩核倍数", f"{max(counts)} 核有效核"]
         )
         lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
-        for stage, (label, unit) in MICRO.items():
-            plan = data["ipc_plans" if stage in BOUNDARIES else "plans"]
+        for stage in args.stages:
+            label, unit = CASES[stage]
+            plan = data["plans"]
             if not plan:
                 continue
             values = [plan[n]["stages"][stage]["ops_s"] for n in counts]

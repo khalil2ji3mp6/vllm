@@ -9,18 +9,24 @@
 ./run.sh --core-sweep 32         # 仅测 32 个物理核
 ```
 
-默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 48、最多 48 条活动序列（整机并发 384），每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。结果见 `host-auto/coverage.md`。
+默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 48、最多 48 条活动序列（整机并发 384），每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。完整 Prefill 和 Decode 阶段表见 `host-auto/coverage.md`。
 
 默认 DP8 时，整网指定的核数须为 8 的倍数。32 核对应每 DP 4 核。
 
 ### 2. 单流程
+
+默认只测请求与文本前处理、图片接入与处理。
 
 ```bash
 ./run-stages.sh                       # 默认测单核和全部可用物理核
 ./run-stages.sh --core-sweep 1 32     # 仅测 1 核和 32 核两档
 ```
 
-结果见 `stages/stages.md`。仅需 32 核一档时使用 `--core-sweep 32`。
+结果见 `stages/stages.md`。仅需 32 核一档时使用 `--core-sweep 32`。定位其他阶段时用 `--stages` 点名，例如测两段 IPC 和引擎调度：
+
+```bash
+./run-stages.sh --stages frontend_ipc worker_ipc drive_scheduler --core-sweep 32
+```
 
 ### 3. 两台机器固定两个 NUMA 节点，各取 16 个物理核
 
