@@ -11,6 +11,8 @@
 
 ### 自动前端参数
 
+当前默认分阶段运行，两个池的线程槽数均为 ⌈min(C,Q)/F⌉。下表及下述池预算对应旧的重叠模式（`--no-separate-image-text`）。
+
 每个 DP 的物理核数为 C，在途请求数为 Q。共享核组下，前端预算 B 取 max(1, C − TP − 1)。前端进程数 F 取 max(1, min(⌊B/4⌋, ⌈Q/16⌉))。每个前端的 renderer 池容量取 min(⌈Q/F⌉, max(1, ⌊(B−F)/F⌋))，有图片时媒体池默认用同样的容量。预算中的减法只用于算池大小，inherit 模式并没有给引擎和 worker 划出专属 CPU。前端按请求序号轮转分片，每条请求从输入到流式输出由同一个前端负责。[frontend_plan](bench.py) · [front_worker](frontend.py)
 
 | 总物理核 / DP | 每 DP 核组 | 每 DP 前端进程 | 每前端 renderer / 媒体线程槽 | 整机 EngineCore / worker |
@@ -26,7 +28,7 @@
 | 阶段 | 代码入口与数据流 | 执行者和并行边界 |
 |---|---|---|
 | 请求与文本前处理 | [preprocess_requests、MeasuredRenderer](frontend.py) → Schema 和采样参数 → OnlineRenderer → Chat Template、分词 → InputProcessor、OutputProcessor 建状态。[RC5 适配器](tokenizer_rc5.py) 返回 Python token ID 列表 | 每前端一个 uvloop 事件循环。校验、建状态在主线程，模板和分词交给 renderer 线程池。每个前端有独立解释器，同进程 Python 代码和 ID 列表构造受到 GIL 约束 |
-| 图片接入与处理 | 校验后 await [ImageCodec.decode_request](image_codec.py) → MediaConnector → Base64 解码、Pillow 解压与 RGB 转换，随后继续同一请求的文字渲染 | 每前端使用媒体池。不同请求由 asyncio.gather 并发推进，图片与别的请求的文字可以重叠；同一请求先完成图片再进行文字渲染。图片在本地内存中，独立编码参考轮位于业务计时之外 |
+| 图片接入与处理 | 校验后 await [ImageCodec.decode_request](image_codec.py) → MediaConnector → Base64 解码、Pillow 解压与 RGB 转换，随后继续同一请求的文字渲染 | 每前端使用媒体池。不同请求由 asyncio.gather 并发推进，重叠模式下图片与别的请求的文字可以重叠；同一请求先完成图片再进行文字渲染。图片在本地内存中，独立编码参考轮位于业务计时之外 |
 | 进程通信与入队 | 前端将 32K 请求序列化，通过 ZMQ PAIR 交给 EngineCore；引擎反序列化、计算块哈希并入队。调度结果通过 SHM MessageQueue 下发，worker 返回固定结果，引擎再将输出发给所属前端。[timed_scenario](bench.py) · [run_worker](worker.py) | 每 DP 一个引擎消费者。引擎对本步 worker 回复进行同步等待，主表通信分组统计收发和解包等已打点区间。完整等回复时间在细表，含对端准备数据的时间 |
 | 引擎调度与请求状态 | [build_scheduler、add、classify](engine.py) → Scheduler.schedule → 分配 token 预算和逻辑 KV 块 → 收到 worker 结果 → update_from_output → 释放或继续调度 | 每 DP 一个同步调度循环，默认最多 32 条活动序列、每步 16,384 token 预算。自动逻辑 KV 块预算按可同时运行的序列及输入输出长度计算，保留一个空块，至少 8,192 块。32 条 32K 输入 / 1K 输出在块长 128 时分配 8,449 块。基准显式设 `async_scheduling=False`，当前步结果更新后再调下一步 |
 | Worker 输入准备 | [CpuBatch.update、CpuBatch.prepare](worker.py) 维护请求与块表，组装 IDs、位置、序列长度和索引；[dummy_result](engine.py) 生成固定返回 token | 每 DP / TP rank 一个 worker。TP1 时同一时刻每个 DP 只有一份 worker 在处理这一步。输入数组在 CPU 上构造，不加载模型权重或启动设备算子 |

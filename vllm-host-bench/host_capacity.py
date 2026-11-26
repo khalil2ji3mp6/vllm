@@ -253,7 +253,7 @@ def reserve_output_dir(requested):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path)
+    parser.add_argument("--out", type=Path, default=Path("host-auto"))
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--keep-diagnostics", action="store_true",
                         help="Keep per-round and per-DP data under the output directory")
@@ -274,7 +274,7 @@ def main():
     parser.add_argument("--blocks", type=int, help="Override each DP logical KV block budget")
     parser.add_argument("--max-num-seqs", type=int, default=32, help="Maximum running sequences per DP")
     parser.add_argument("--chunk-tokens", type=int, default=16384)
-    parser.add_argument("--separate-image-text", action="store_true", help="Finish all images across DPs before rendering text; use full frontend pools")
+    parser.add_argument("--separate-image-text", action=argparse.BooleanOptionalAction, default=None, help="Finish all images across DPs before rendering text; use full frontend pools")
     parser.add_argument("--full-frontend-pools", action="store_true", help="Size each frontend pool to cover the DP core mask")
     parser.add_argument("--request-file", type=Path)
     media = parser.add_mutually_exclusive_group()
@@ -291,6 +291,10 @@ def main():
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--round-timeout", type=int, default=900)
     args = parser.parse_args()
+    if args.separate_image_text is None:
+        # Preserve explicit overlap experiments and the text-only path.
+        args.separate_image_text = not (args.full_frontend_pools or args.text_only
+                                        or args.renderer_num_workers or args.media_loading_threads)
     if args.separate_image_text:
         args.full_frontend_pools = True
     if args.full_frontend_pools and (args.text_only or args.renderer_num_workers or args.media_loading_threads):
@@ -352,8 +356,6 @@ def main():
         plans = [plan for _, plan in trials]
         print(json.dumps(plans if args.core_sweep else plans[0], indent=2))
         return
-    if args.out is None:
-        parser.error("--out is required for a measured run")
     if args.request_file is not None and not args.request_file.is_file():
         parser.error(f"Request file not found: {args.request_file}")
 

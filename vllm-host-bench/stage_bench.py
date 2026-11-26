@@ -331,7 +331,7 @@ def main():
     )
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--seconds", type=float, default=1.0)
-    parser.add_argument("--out", type=Path)
+    parser.add_argument("--out", type=Path, default=Path("stages"))
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("A_JSON", "B_JSON"))
     parser.add_argument("--keep-diagnostics", action="store_true")
     args = parser.parse_args()
@@ -343,8 +343,6 @@ def main():
         except (ValueError, KeyError, OSError) as exc:
             parser.error(str(exc))
         return
-    if args.out is None:
-        parser.error("Use --out for measured runs")
     if args.rounds < 1 or not 0 < args.seconds < 240:
         parser.error("Use positive rounds and a sample window below 240 seconds")
     topo = cpu_topology()
