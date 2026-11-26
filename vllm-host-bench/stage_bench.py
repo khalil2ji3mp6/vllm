@@ -18,6 +18,7 @@ from threading import BrokenBarrierError
 from time import perf_counter_ns
 
 from cpu_topology import cpu_topology
+from flow_groups import MICRO
 from host_capacity import distribute_all_cores, reserve_output_dir
 from stage_counters import Counters
 from stage_transport import BOUNDARIES, measure_pairs
@@ -44,6 +45,7 @@ CASES = {
 
 
 CASES.update({name: (title, "往返") for name, title in BOUNDARIES.items()})
+CASES.update(MICRO)
 THREAD_CASES = {
     "schema",
     "template",
@@ -318,7 +320,7 @@ def compare(paths):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core-sweep", nargs="+", default=["1", "all"])
-    parser.add_argument("--stages", nargs="+", choices=CASES, default=list(CASES))
+    parser.add_argument("--stages", nargs="+", choices=CASES)
     parser.add_argument(
         "--layouts",
         nargs="+",
@@ -330,7 +332,10 @@ def main():
     parser.add_argument("--seconds", type=float, default=1.0)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("A_JSON", "B_JSON"))
+    parser.add_argument("--keep-diagnostics", action="store_true")
     args = parser.parse_args()
+    explicit = args.stages is not None
+    args.stages = args.stages or (list(CASES) if args.keep_diagnostics else list(MICRO))
     if args.compare:
         try:
             compare(args.compare)
@@ -396,7 +401,9 @@ def main():
         ("threads", "thread_plans", "共享解释器，最多八个进程，每核一个线程"),
         ("ipc", "ipc_plans", "进程间传输，每 DP 一对收发进程"),
     ):
-        if mode not in args.layouts:
+        if mode not in args.layouts or (
+            mode == "threads" and not (explicit or args.keep_diagnostics)
+        ):
             continue
         stages = [
             s
@@ -453,6 +460,35 @@ def main():
             )
         reports.append("\n".join(table))
     report = "\n\n".join(reports) + "\n"
+    if not explicit:
+        if args.keep_diagnostics:
+            (out / "stages-details.md").write_text(report)
+        header = (
+            ["流程", "工作单位"]
+            + [f"{n} 核吞吐/s" for n in counts]
+            + ["扩核倍数", f"{max(counts)} 核有效核"]
+        )
+        lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+        for stage, (label, unit) in MICRO.items():
+            plan = data["ipc_plans" if stage in BOUNDARIES else "plans"]
+            if not plan:
+                continue
+            values = [plan[n]["stages"][stage]["ops_s"] for n in counts]
+            peak = plan[max(counts)]["stages"][stage]
+            ratio = (
+                f"{peak['ops_s'] / plan[1]['stages'][stage]['ops_s']:.2f}×"
+                if 1 in counts
+                else "—"
+            )
+            cells = [
+                label,
+                unit,
+                *(f"{v:,.2f}" for v in values),
+                ratio,
+                f"{peak['effective_cores']:.1f}",
+            ]
+            lines.append("| " + " | ".join(cells) + " |")
+        report = "\n".join(lines) + "\n"
     (out / "stages.md").write_text(report)
     print(report, end="")
 

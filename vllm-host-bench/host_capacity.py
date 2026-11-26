@@ -366,7 +366,7 @@ def main():
             write_profile(summaries, trial.out)
         heading = (f"{cores} 核（µs/请求）" if args.core_sweep else "摊销墙钟（µs/请求）")
         columns.append((heading, summaries))
-    markdown = write_stage_tables(columns, out)
+    markdown = write_stage_tables(columns, out, diagnostics=args.keep_diagnostics)
     if not args.keep_diagnostics:
         shutil.rmtree(scratch)
     print(markdown)

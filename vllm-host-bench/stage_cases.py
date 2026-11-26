@@ -92,6 +92,33 @@ class Cases:
             assert len(ids) == 32768
             self.ids_hash.update(array("I", ids).tobytes())
 
+    def text_request(self, i):
+        messages = self.messages[i % 32]
+        payload = msgspec.json.encode(
+            dict(model="glm", messages=messages, max_tokens=1024, stream=True)
+        )
+        request = ChatCompletionRequest.model_validate_json(payload)
+        assert request.max_tokens == 1024
+        params = sampling()
+        text = safe_apply_chat_template(
+            self.cfg.model_config,
+            self.tokenizer,
+            request.messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        assert len(ids) == 32768
+        req = self.input.process_inputs(
+            str(i), tokens_input(ids, prompt=text), params, ("generate",)
+        )
+        req.external_req_id = req.request_id
+        OutputProcessor(self.tokenizer, log_stats=False).add_request(req, text)
+
+    def image_request(self, i):
+        with self.media.load_bytes(self.base64(i)).media as image:
+            assert image.size == (1024, 1024) and image.mode == "RGB"
+
     def schema(self, i):
         request = ChatCompletionRequest.model_validate_json(self.payloads[i % 32])
         assert request.max_tokens == 1024

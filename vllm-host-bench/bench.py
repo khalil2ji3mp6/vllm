@@ -138,7 +138,8 @@ def measure_reply_acquire(reply, clock, active):
             # Retain the SHM read lease through upstream unpacking and release.
             with clock.span(active["phase"], "engine_worker_reply_acquire"):
                 buf = stack.enter_context(acquire(*args, **kwargs))
-            yield buf
+            with clock.span(active["phase"], "engine_worker_unpack"):
+                yield buf
 
     with patch.object(reply, "acquire_read", timed_acquire):
         yield

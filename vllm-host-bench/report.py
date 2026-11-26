@@ -4,6 +4,9 @@ import csv
 import json
 from collections import defaultdict
 from pathlib import Path
+from statistics import mean, median
+
+from flow_groups import TARGETS, TOTAL, groups
 
 
 def point(process, stage):
@@ -127,7 +130,7 @@ def capture_stage_intervals(processes):
             for name in names:
                 spans[section, name, stage].extend((start, end) for start, end, _ in samples)
 
-    return {
+    captured = {
         section: {
             title: merge_intervals(span for target in targets
                                    for span in spans.get((section, *target), ()))
@@ -135,6 +138,13 @@ def capture_stage_intervals(processes):
         }
         for section, design in (("Prefill", PREFILL), ("Decode", DECODE))
     }
+
+
+    for section, rows in captured.items():
+        for group in groups(section):
+            rows[group] = merge_intervals(span for proc, stage in TARGETS[group]
+                                          for span in spans.get((section, proc, stage), ()))
+    return captured
 
 
 def stage_values(summaries, case):
@@ -171,7 +181,7 @@ def stage_values(summaries, case):
     return tables
 
 
-def write_stage_tables(columns, out, case="cold"):
+def write_detail_tables(columns, out, case="cold"):
     headings, summaries = zip(*columns, strict=True)
     tables = [stage_values(group, case) for group in summaries]
     header = (*LABELS, *headings)
@@ -189,6 +199,51 @@ def write_stage_tables(columns, out, case="cold"):
             csv.writer(file).writerows([header, *rows])
     markdown = "\n".join(lines)
     (out / "coverage.md").write_text(markdown, encoding="utf-8")
+    return markdown
+
+
+def write_stage_tables(columns, out, case="cold", diagnostics=False):
+    # Retained pre-group summaries can still be rendered using their original schema.
+    if TOTAL not in columns[0][1][0]["stage_intervals"][case][0]["Prefill"]:
+        return write_detail_tables(columns, out, case)
+    if diagnostics:
+        detail = out / "details"
+        detail.mkdir(exist_ok=True)
+        write_detail_tables(columns, detail, case)
+    headings = [h for h, _ in columns]
+    result = []
+    rates = []
+    for heading, replicas in columns:
+        rounds = list(zip(*(s["workload"][case] for s in replicas), strict=True))
+        counts = [sum(len(r["host_request_latency_ns"]) for r in batch) for batch in rounds]
+        rates.append(median(n * 1e9 / (max(r["end_ns"] for r in batch) - min(r["start_ns"] for r in batch))
+                            for n, batch in zip(counts, rounds, strict=True)))
+        values = {}
+        for phase in ("Prefill", "Decode"):
+            for group in groups(phase):
+                samples = []
+                seen = False
+                for i, n in enumerate(counts):
+                    spans = merge_intervals(span for s in replicas for span in
+                                            s["stage_intervals"][case][i][phase][group])
+                    seen |= bool(spans)
+                    samples.append(sum(b-a for a,b in spans) / (1000*n))
+                values[phase, group] = f"{mean(samples):.2f}" if seen else "—"
+        result.append(values)
+    lines = []
+    for phase in ("Prefill", "Decode"):
+        rows = [("流程", *headings)]
+        rows.extend((g, *(v[phase,g] for v in result)) for g in groups(phase))
+        with (out / f"{phase.lower()}.csv").open("w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerows(rows)
+        lines.extend([f"## {phase}", "", "| " + " | ".join(rows[0]) + " |",
+                      "|" + "---|" * len(rows[0])])
+        lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
+        lines.append("")
+    labels = [h.split("（")[0] + " " if len(columns)>1 else "" for h in headings]
+    lines.append("端到端吞吐（请求/s） " + " / ".join(f"{label}{rate:.2f}" for label, rate in zip(labels, rates)))
+    markdown = "\n".join(lines) + "\n"
+    (out / "coverage.md").write_text(markdown)
     return markdown
 
 
