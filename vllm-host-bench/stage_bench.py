@@ -69,6 +69,13 @@ def lane(cpu, cases, args, gate, deadline, directory):
     counters = Counters()
     try:
         cases.initialize_lane(args.stages)
+        probe_pages = (
+            args.stages == ["copy64"] and os.getenv("VLLM_HOST_COPY_PLACEMENT") == "1"
+        )
+        if probe_pages:
+            from memory_placement import placement
+
+            before_copy = {"src": placement(cases.src), "dst": placement(cases.dst)}
         rows = {}
         for stage in args.stages:
             operation = getattr(cases, stage)
@@ -106,6 +113,20 @@ def lane(cpu, cases, args, gate, deadline, directory):
                         pmu_errors=counters.errors,
                     )
                 )
+        if probe_pages:
+            gate.wait()
+            (directory / f"placement-{cpu}.json").write_text(
+                json.dumps(
+                    {
+                        "cpu": cpu,
+                        "before": before_copy,
+                        "after": {
+                            "src": placement(cases.src),
+                            "dst": placement(cases.dst),
+                        },
+                    }
+                )
+            )
         (directory / f"{cpu}.json").write_text(json.dumps(rows))
     except BaseException as exc:
         if not isinstance(exc, BrokenBarrierError):
@@ -198,6 +219,9 @@ def sample(cores, layout, args, out):
                 p.join()
         fixtures = [json.loads(p.read_text()) for p in directory.glob("fixture-*.json")]
         assert len(fixtures) == len(layout) and all(f == fixtures[0] for f in fixtures)
+        placements = [
+            json.loads(p.read_text()) for p in directory.glob("placement-*.json")
+        ]
         lanes = [
             json.loads((directory / f"{cpu}.json").read_text())
             for group in layout
@@ -246,7 +270,10 @@ def sample(cores, layout, args, out):
             "ops_s": median(r["ops_s"] for r in rounds),
             "effective_cores": median(r["effective_cores"] for r in rounds),
         }
-    return dict(cpu_masks=layout, fixture=fixtures[0], stages=results)
+    plan = dict(cpu_masks=layout, fixture=fixtures[0], stages=results)
+    if placements:
+        plan["copy_placement"] = placements
+    return plan
 
 
 def compare(paths):
