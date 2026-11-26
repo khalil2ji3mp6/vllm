@@ -33,6 +33,7 @@ sys.modules["torch_npu"] = None
 
 from cpu_topology import cpu_topology
 from measure import Clock, distribution
+from request_times import request_times
 
 
 def affinity(args):
@@ -183,6 +184,9 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                     requests.append(decoder.decode(frames))
         return requests
 
+    step_weights = defaultdict(list)
+    send_weights = defaultdict(list)
+    generated = set()
     received = 0
     seed_ns = 0
     if case == "l1":
@@ -194,8 +198,8 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
         seed_start = perf_counter_ns()
         seed_prefixes(sched, requests, hasher, args.hit_tokens, token_id)
         seed_ns = perf_counter_ns() - seed_start
-        with clock.span("prefill", "engine_add_request_and_hash"):
-            for req in requests:
+        for req in requests:
+            with clock.span("prefill", "engine_add_request_and_hash"):
                 add(sched, req, hasher)
 
     counts = Counter()
@@ -205,8 +209,8 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                 requests = receive_requests(wait=not sched.has_requests())
                 if requests:
                     received += len(requests)
-                    with clock.span("prefill", "engine_add_request_and_hash"):
-                        for req in requests:
+                    for req in requests:
+                        with clock.span("prefill", "engine_add_request_and_hash"):
                             add(sched, req, hasher)
             if not sched.has_requests():
                 continue
@@ -226,6 +230,8 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                 raise RuntimeError("Scheduler exceeded configured token budget")
             if output.preempted_req_ids:
                 raise RuntimeError("Logical KV cache capacity was insufficient")
+            n_decode = len(generated.intersection(sample))
+            step_weights[phase].append((len(sample) - n_decode, n_decode))
             active["phase"] = phase
             counts.setdefault("first_scheduled_step_ns", step_start)
             counts[phase + "_steps"] += 1
@@ -242,6 +248,10 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                 for client, group in outputs.items():
                     if not group.outputs:
                         continue
+                    ids = [o.request_id for o in group.outputs if o.new_token_ids]
+                    decoded = sum(rid in generated for rid in ids)
+                    send_weights[phase].append((len(ids) - decoded, decoded))
+                    generated.update(ids)
                     counts["output_tokens"] += sum(len(o.new_token_ids) for o in group.outputs)
                     with clock.span(phase, "engine_front_output_pack"):
                         sockets[client].send_multipart([phase.encode(), *encoder.encode(group)])
@@ -257,8 +267,11 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
                          renderer_peak_threads=0, media_peak_threads=0, image_text_overlap=False)
     ready = start
     image_end = None
+    output_times = {"Prefill": Counter(), "Decode": Counter()}
     for front in fronts:
         rows, tokens, size, metrics = get(front, args.timeout)
+        for section, totals in metrics["output_times"].items():
+            output_times[section].update(totals)
         for key, values in rows.items():
             front_rows[key].extend(values)
         if "prefill_resources" in metrics:
@@ -303,7 +316,15 @@ def timed_scenario(args, name, cfg, case, fronts, token_id, sockets, tx, reply, 
     counts["end_ns"] = end
     counts["diagnostic_tail_ns"] = perf_counter_ns() - end
     counts["engine_cpu_ns"] = engine_cpu_ns
+    expected_decode = expected_outputs - args.concurrency
+    scheduled_decode = sum(d for weights in step_weights.values() for _, d in weights)
+    if len(generated) != args.concurrency or scheduled_decode != expected_decode:
+        raise RuntimeError("Request-stage weights disagree with emitted token counts")
     metrics = dict(counts) | front_metrics
+    metrics["request_stage_ns"] = request_times(
+        clock.rows, front_rows, [rows for rows, _, _ in worker_results],
+        step_weights, send_weights, output_times,
+    )
     metrics["worker_cpu_ns"] = [cpu_ns for _, cpu_ns, _ in worker_results]
     return metrics, {"engine": clock.rows, "frontend": front_rows,
                      **{f"worker{rank}": rows for rank, (rows, _, _) in enumerate(worker_results)}}

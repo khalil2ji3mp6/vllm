@@ -44,7 +44,7 @@
 
 ## 从输出判断时间花在哪里
 
-- `coverage.md` 每个分组按轮合并所有 DP 的重叠区间并除以完成请求数。表尾的「阶段合计」相加该列各组显示值；跨组重叠分别计入各行，未打点的等待也不计入。混合调度步的操作区间整体归入 Prefill；请求生命周期以实际首 token 为界。[分组目标](flow_groups.py) · [区间聚合与吞吐](report.py)
+- `coverage.md` 记录单请求平均已打点耗时。Prefill 包含一个请求全部输入分块及首 token；Decode 按一个请求首 token 后的单个输出步平均。共享批操作对每个参与请求计入完整耗时；混合批按请求是否已生成首 token 分开归属。阶段合计逐列相加。端到端还包含排队与空闲等待。[分组目标](flow_groups.py) · [区间聚合与吞吐](report.py)
 - `--keep-diagnostics` 保留 `details/coverage.md`。比较前端扩核效果看「Prefill 前处理合计」，请求生命周期看逐轮 TTFT 和完成延迟。整轮吞吐是正式轮请求/s 的中位数。请求总数和 token 数由引擎、前端和整机控制器核对。
 - `.runs/cores-N/cpu-plan.json` 记录分配策略；`host-rounds.csv` 给出各角色的进程 CPU 时间除以墙钟所得的有效核及线程峰值。有效核包括同步、轮询等 CPU 时间。`core-usage.md` 另给出部分组活跃期间实际占核，统计分母不同。[整机 CPU 汇总](host_capacity.py) · [阶段占核](stage_profile.py)
 

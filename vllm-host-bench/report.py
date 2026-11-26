@@ -186,7 +186,8 @@ def stage_values(summaries, case):
 def write_detail_tables(columns, out, case="cold"):
     headings, summaries = zip(*columns, strict=True)
     tables = [stage_values(group, case) for group in summaries]
-    header = (*LABELS, *headings)
+    header = (*LABELS, *(f"{h.partition('（')[0]}（摊销墙钟 µs/请求）" if "核" in h
+                         else "摊销墙钟 µs/请求" for h in headings))
     lines = []
     for phase in ("Prefill", "Decode"):
         rows = []
@@ -206,6 +207,11 @@ def write_detail_tables(columns, out, case="cold"):
 
 def write_stage_tables(columns, out, case="cold", diagnostics=False):
     # Retained pre-group summaries can still be rendered using their original schema.
+    recorded = ["request_stage_ns" in r for _, replicas in columns for s in replicas
+                for r in s["workload"][case]]
+    weighted = all(recorded)
+    if any(recorded) != weighted:
+        raise ValueError("Cannot compare request-weighted and historical measurements")
     if TEXT not in columns[0][1][0]["stage_intervals"][case][0]["Prefill"]:
         return write_detail_tables(columns, out, case)
     if diagnostics:
@@ -221,21 +227,31 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         rates.append(median(n * 1e9 / (max(r["end_ns"] for r in batch) - min(r["start_ns"] for r in batch))
                             for n, batch in zip(counts, rounds, strict=True)))
         values = {}
+        samples = [r for batch in rounds for r in batch]
         for phase in ("Prefill", "Decode"):
+            denominator = (sum(counts) if phase == "Prefill" else
+                           sum(r["output_tokens"] for r in samples) - sum(counts))
             for group in groups(phase):
-                samples = []
-                seen = False
-                for i, n in enumerate(counts):
-                    # Overlapping work on different DPs counts once toward host wall time.
-                    spans = merge_intervals(span for s in replicas for span in
-                                            s["stage_intervals"][case][i][phase][group])
-                    seen |= bool(spans)
-                    samples.append(sum(b-a for a,b in spans) / (1000*n))
-                values[phase, group] = f"{mean(samples):.2f}" if seen else "—"
+                if not weighted:
+                    # Legacy reports only retained the union of each group across requests.
+                    elapsed = []
+                    for i, n in enumerate(counts):
+                        intervals = merge_intervals(span for s in replicas for span in
+                            s["stage_intervals"][case][i][phase][group])
+                        elapsed.append(sum(b-a for a,b in intervals) / (1000*n))
+                    values[phase, group] = f"{mean(elapsed):.2f}" if any(elapsed) else "—"
+                    continue
+                contributions = [r["request_stage_ns"][phase][group] for r in samples
+                                 if group in r["request_stage_ns"][phase]]
+                values[phase, group] = (f"{sum(contributions) / (1000 * denominator):.2f}"
+                                        if contributions and denominator else "—")
         result.append(values)
     lines = []
     for phase in ("Prefill", "Decode"):
-        rows = [("流程", *headings)]
+        unit = "µs/请求" if phase == "Prefill" else "µs/请求/输出步"
+        if not weighted:
+            unit = "摊销墙钟 µs/请求"
+        rows = [("流程", *(f"{h.partition('（')[0]}（{unit}）" if "核" in h else unit for h in headings))]
         rows.extend((g, *(v[phase,g] for v in result)) for g in groups(phase))
         # Sum the displayed precision so the CSV and Markdown can be checked by hand.
         totals = []

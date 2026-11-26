@@ -1,6 +1,7 @@
 """Local frontend with per-request image and text preprocessing."""
 import asyncio
 import os
+from collections import defaultdict
 from contextvars import ContextVar
 from time import perf_counter_ns, process_time_ns
 
@@ -21,6 +22,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from engine import config
 from measure import Clock
+from request_times import frontend_output_times
 from tokenizer_rc5 import GlmRc5Tokenizer
 
 
@@ -177,6 +179,7 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
     serialized_bytes = 0
     first_token_ns = {}
     finished_ns = {}
+    batches = defaultdict(list)
     while True:
         # Idle socket waits are not counted as frontend computation.
         phase, *frames = await sock.recv_multipart()
@@ -195,16 +198,20 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
                 emitted += count
                 serialized_bytes += size
         now = perf_counter_ns() - batch_start_ns
+        first_before = len(first_token_ns)
         for item in output.request_outputs:
             for choice in item.outputs:
                 if choice.token_ids:
                     first_token_ns.setdefault(item.request_id, now)
                 if choice.finish_reason is not None:
                     finished_ns[item.request_id] = now
+        first = len(first_token_ns) - first_before
+        batches[phase].append((first, count - first))
         await asyncio.sleep(0)
     if len(first_token_ns) != request_count or len(finished_ns) != request_count:
         raise RuntimeError("Missing first token or completion timestamp")
-    return emitted, serialized_bytes, list(first_token_ns.values()), list(finished_ns.values())
+    return (emitted, serialized_bytes, list(first_token_ns.values()), list(finished_ns.values()),
+            frontend_output_times(clock, batches))
 
 
 async def run_front_round(args, front_index, entries, images, renderer, name,
@@ -257,8 +264,8 @@ def front_worker(args, front_index, ipc_path, control):
                     args, front_index, entries, images, online_renderer, name,
                     input_processor, processor, encoder, decoder, sock, clock, batch_start_ns,
                 ))
-                emitted, serialized_bytes, first_token_ns, finished_ns = responses
-                metrics = dict(frontend_cpu_ns=process_time_ns() - cpu_start,
+                emitted, serialized_bytes, first_token_ns, finished_ns, output_times = responses
+                metrics = dict(output_times=output_times, frontend_cpu_ns=process_time_ns() - cpu_start,
                                host_ttft_ns=first_token_ns,
                                host_request_latency_ns=finished_ns)
                 if clock.resources:

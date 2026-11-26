@@ -48,7 +48,7 @@ CPU 按 sysfs 的 SMT 兄弟关系去重，优先让每个 DP 留在同一个 NU
 | 图片接入与编解码合计 | 服务端 Base64 解码、图片解压和 RGB 转换的时间并集 | 图片线程按核数和并发自动计算，独立 JPEG 编码使用相同的前端并行预算 |
 | 图片 Base64 编码（独立样本） | 小。pybase64 在每个图片任务内编码，多个图片任务可并行 | 图片编码后的字节数 |
 | 多模态 Processor（resize、归一化、patch 等） | 取决于生产 Processor。此版 vLLM 每个 renderer 用独立单线程 executor，单前端加核可减少争抢以及与分词重叠，GLM-5.2 文本基准保留空值 | 生产 `--limit-mm-per-prompt`、`--media-io-kwargs`、`--mm-processor-cache-gb` 改变输入量和缓存 |
-| 前端与引擎间 IPC、请求入队 | 等待和排队可能明显下降，单条序列化、解码和整批入队的 CPU 时间通常变化小 | 基准由 `--cores-per-replica` 提供调度余量 |
+| 前端与引擎间 IPC、请求入队 | 等待和排队可能明显下降，单条序列化、解码和入队的 CPU 时间通常变化小 | 基准由 `--cores-per-replica` 提供调度余量 |
 | 请求调度、batch 组织、token 预算分配 | 小。每个 EngineCore 单路调用 `schedule()`，单次调度的工作可以随 batch 形状变化 | 基准 `--chunk-tokens` 默认 16384，`--max-num-seqs` 默认 32。生产 `--max-num-batched-tokens`、`--max-num-seqs`、`--async-scheduling` |
 | 前缀缓存匹配、KV 逻辑块分配 | 小。由同一个调度线程执行 | 生产 `--enable-prefix-caching` 和 `--block-size` 改变工作量 |
 | 准备输入 tensor、位置、序列长度和块表 | 小。当前 TP1 worker 的准备逻辑为单路，更多核能减少 worker 等待 CPU 的时间 | 基准 Torch 单线程。生产 Ascend 的 `enable_cpu_binding` 控制 NPU worker 的绑核 |
@@ -136,7 +136,7 @@ cd vllm-host-bench
 
 默认单流程表有 8 行。请求与文本前处理在一次调用内完成 Schema、模板、32K 分词及前端建状态；图片接入在一次调用内完成 Base64 解码和 RGB 图片加载。通信拆成前端↔Core 与 Core↔worker 往返，输入准备拆成 Prefill 分块与 Decode 单序列步。调度和输出处理分别以完整请求为单位。扩核倍数为最大实测档吞吐除以单核吞吐。显式选择 `--stages` 时仍显示所选细项。
 
-整网输出同名的六类 CPU 阶段。Decode 从通信开始，共四类。每轮先在各 DP 间合并每类原始时间区间，以该轮完成请求数归一化，再对正式轮次求算术平均。通信行纳入发送、入队和解包打点，排除整段等 worker 回复的时间。混合调度步归入 Prefill。「阶段合计」逐列相加本阶段各组显示值，保留两位小数。组间并行区间可以在多个组中计入，等待也可能落在所有打点之外。请求延迟、首 token 时间可在逐轮诊断中查看。端到端吞吐取各正式轮吞吐中位数。
+整网输出同名的六类 CPU 阶段。Decode 从通信开始，共四类。Prefill 按每个请求从接入到首 token 所经历的已打点操作求和，包含该请求的所有输入分块。Decode 按每个请求首 token 之后的一次输出步统计。每个批操作的时间按参与请求全额计入，混合批分别计入各请求当前所处的阶段，之后汇总所有 DP、所有正式轮次并除以请求数或实际后续输出 token 数。通信行计入发送、入队和解包，等待时间在诊断中查看。「阶段合计」逐列相加本阶段各组显示值，保留两位小数。组间并行区间可以在多个组中计入，等待也可能落在所有打点之外。请求延迟、首 token 时间可在逐轮诊断中查看。端到端吞吐取各正式轮吞吐中位数。
 
 单测加 `--keep-diagnostics` 时补跑共享解释器及各细项，另存 `stages-details.md`。整网加同一开关时在 `details/coverage.md` 保留历史细表，包含原 Prefill 前处理合计和等待 worker 的打点。
 
