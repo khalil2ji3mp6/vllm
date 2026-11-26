@@ -274,6 +274,8 @@ def main():
     parser.add_argument("--blocks", type=int, help="Override each DP logical KV block budget")
     parser.add_argument("--max-num-seqs", type=int, default=32, help="Maximum running sequences per DP")
     parser.add_argument("--chunk-tokens", type=int, default=16384)
+    parser.add_argument("--separate-image-text", action="store_true", help="Finish all images across DPs before rendering text; use full frontend pools")
+    parser.add_argument("--full-frontend-pools", action="store_true", help="Size each frontend pool to cover the DP core mask")
     parser.add_argument("--request-file", type=Path)
     media = parser.add_mutually_exclusive_group()
     media.add_argument("--image-file", type=Path, help="One local JPEG or PNG per request")
@@ -289,6 +291,10 @@ def main():
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--round-timeout", type=int, default=900)
     args = parser.parse_args()
+    if args.separate_image_text:
+        args.full_frontend_pools = True
+    if args.full_frontend_pools and (args.text_only or args.renderer_num_workers or args.media_loading_threads):
+        parser.error("Full frontend pools require image input and automatic pool sizes")
     if args.core_sweep == []:
         args.core_sweep = list(STANDARD_CORE_SWEEP)
     if args.compare:
@@ -385,13 +391,18 @@ def make_plan(args, topology, api_per_replica):
     plan = capacity_plan(topology, args.replicas, args.cores_per_replica)
     plan.update(dp_size=args.replicas, tp_size=args.tp, logical_cards=args.replicas * args.tp)
     for replica in plan["replicas"]:
-        compact = args.cores_per_replica == args.tp + 2 and api_per_replica in (None, 1)
+        compact = not args.full_frontend_pools and args.cores_per_replica == args.tp + 2 and api_per_replica in (None, 1)
         replica["affinity"] = "compact" if compact else "inherit"
         replica["frontend"] = frontend_plan(
             len(replica["cpus"]), args.tp, args.concurrency_per_replica,
             not args.text_only, compact, api_per_replica,
             args.renderer_num_workers, args.media_loading_threads,
         )
+        if args.full_frontend_pools:
+            front = replica["frontend"]
+            n = front["api_server_count"]
+            width = (min(len(replica["cpus"]), args.concurrency_per_replica) + n - 1) // n
+            front.update(renderer_num_workers=width, media_loading_threads=width)
     return plan
 
 
@@ -423,6 +434,9 @@ def run_capacity(args, plan, root):
                    "--runs", str(args.runs), "--timeout", str(args.timeout),
                    "--round-timeout", str(args.round_timeout), "--round-gate", str(gates),
                    "--replica-id", str(i), "--out", str(directory)]
+            if args.separate_image_text:
+                total_fronts = sum(r["frontend"]["api_server_count"] for r in plan["replicas"])
+                cmd.extend(["--image-barrier-parties", str(total_fronts)])
             if args.blocks is not None:
                 cmd.extend(["--blocks", str(args.blocks)])
             if args.request_file:
@@ -480,7 +494,7 @@ def run_capacity(args, plan, root):
     workload_profile = dict(
         replicas=len(summaries), request_file_sha256=first["request_file_sha256"],
         metadata_sha256=first["metadata_sha256"], versions=first["versions"], image=image_workload(first),
-        frontend_pipeline="hf_renderer_rc5", round_end="last_serialized_response",
+        frontend_pipeline=("hf_renderer_rc5_separate" if args.separate_image_text else "hf_renderer_rc5"), round_end="last_serialized_response",
         **{key: first["parameters"][key] for key in (
             "tp", "concurrency", "prompt_tokens", "new_tokens", "chunk_tokens",
             "max_num_seqs", "max_model_len", "block_size", "blocks", "cases", "warmup", "runs",

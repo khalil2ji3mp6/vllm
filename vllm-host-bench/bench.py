@@ -545,6 +545,7 @@ def parse_args():
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--runs", type=int, default=5)
     p.add_argument("--timeout", type=int, default=45)
+    p.add_argument("--image-barrier-parties", type=int, default=0, help=argparse.SUPPRESS)
     p.add_argument("--round-gate", type=Path, help=argparse.SUPPRESS)
     p.add_argument("--replica-id", type=int, help=argparse.SUPPRESS)
     p.add_argument("--round-timeout", type=int, default=600, help=argparse.SUPPRESS)

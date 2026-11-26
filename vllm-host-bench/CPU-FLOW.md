@@ -77,3 +77,9 @@
 ./run.sh --dp 8 --core-sweep 64 192 --max-num-seqs 20 --keep-diagnostics --out dp8-scaling
 ./run.sh --dp 8 --core-sweep 64 192 --new-tokens 1 --max-num-seqs 20 --keep-diagnostics --out dp8-short
 ```
+
+## 图片和文本分阶段的整机对照
+
+`./run.sh --core-sweep 32 192 --separate-image-text --keep-diagnostics --out serial` 先让每个前端完成本轮所有图片，再等所有 DP 的前端就绪，随后开放 Chat Template 和 tokenizer。提前完成图片的请求等待整批图片的时间计入图片行。每个前端继续使用所在 DP 的 CPU 掩码，两种线程池各自按 DP 核数和在途请求数分配线程槽。线程槽代表可并发的任务数，实际活跃核数可在 `core-usage.md` 核对。此模式用于实验，生产 vLLM 的请求之间可以重叠。
+
+对照命令为 `./run.sh --core-sweep 32 192 --full-frontend-pools --keep-diagnostics --out overlap`。它保留相同的核组、前端进程数和两个池大小，允许一条请求的文本阶段和其他请求的图片阶段并行。

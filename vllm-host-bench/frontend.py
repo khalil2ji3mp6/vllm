@@ -105,7 +105,11 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
     # All entries are ready when this frontend submits its batch to the event loop.
     submitted = perf_counter_ns()
 
+    barrier = asyncio.Event() if args.image_barrier_parties else None
+    images_finished = 0
+
     async def prepare(index, messages):
+        nonlocal images_finished
         clock = Clock()
         start = perf_counter_ns()
         with clock.prefill("request_validate"):
@@ -119,6 +123,16 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
             )
         validated = perf_counter_ns()
         image_interval = await images.decode_request(clock) if images else None
+        if barrier is not None:
+            images_finished += 1
+            if images_finished == len(entries):
+                directory = args.round_gate / name
+                (directory / f"images-{args.replica_id}-{front_index}").touch()
+                async with asyncio.timeout(args.round_timeout):
+                    while len(list(directory.glob("images-*"))) < args.image_barrier_parties:
+                        await asyncio.sleep(0.0005)
+                barrier.set()
+            await barrier.wait()
         media_ready = perf_counter_ns() if images else validated
         token = render_clock.set(clock)
         try:
