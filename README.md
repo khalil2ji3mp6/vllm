@@ -28,7 +28,6 @@
 
 ```bash
 CPUS=32-47,96-111
-NODES=2,6
 ARCH=x86
 ```
 
@@ -49,15 +48,14 @@ for node in (0, 1):
 print(",".join(map(str, selected)))
 PYTHON
 )
-NODES=0,1
 ARCH=arm
 ```
 
-两台机器各自在同一个 shell 执行以下两条。两边都将 CPU 和内存限制在所选节点，内存允许在这两个节点之间分配：
+两台机器各自在同一个 shell 执行以下两条命令。`taskset` 将测试进程绑定到选定的 CPU，内存分配沿用系统策略。
 
 ```bash
-numactl --physcpubind="$CPUS" --membind="$NODES" ./run-stages.sh --core-sweep 1 32 --out "stages-${ARCH}-local32"
-numactl --physcpubind="$CPUS" --membind="$NODES" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARCH}-local32"
+taskset -c "$CPUS" ./run-stages.sh --core-sweep 1 32 --out "stages-${ARCH}-local32"
+taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARCH}-local32"
 ```
 
-只需限定 CPU 时，两条命令的 `numactl --physcpubind="$CPUS" --membind="$NODES"` 都可以换成 `taskset -c "$CPUS"`，内存沿用系统策略。两个脚本重复运行都会创建带数字后缀的目录。
+两个脚本重复运行都会创建带数字后缀的目录。
