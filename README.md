@@ -9,7 +9,7 @@
 ./run.sh --core-sweep 32         # 仅测 32 个物理核
 ```
 
-默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 32，每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。结果见 `host-auto/coverage.md`。
+默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 48、最多 48 条活动序列（整机并发 384），每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。结果见 `host-auto/coverage.md`。
 
 默认 DP8 时，整网指定的核数须为 8 的倍数。32 核对应每 DP 4 核。
 

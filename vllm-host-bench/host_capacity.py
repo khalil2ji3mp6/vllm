@@ -268,11 +268,11 @@ def main():
                          help="Spread all available physical cores over the replicas (default)")
     packing.add_argument("--core-sweep", nargs="*", type=int,
                          help=f"Measure total physical cores (default: {' '.join(map(str, STANDARD_CORE_SWEEP))})")
-    parser.add_argument("--concurrency-per-replica", type=int, default=32)
+    parser.add_argument("--concurrency-per-replica", type=int, default=48)
     parser.add_argument("--prompt-tokens", type=int, default=32768)
     parser.add_argument("--new-tokens", type=int, default=1024)
     parser.add_argument("--blocks", type=int, help="Override each DP logical KV block budget")
-    parser.add_argument("--max-num-seqs", type=int, default=32, help="Maximum running sequences per DP")
+    parser.add_argument("--max-num-seqs", type=int, default=48, help="Maximum running sequences per DP")
     parser.add_argument("--chunk-tokens", type=int, default=16384)
     parser.add_argument("--separate-image-text", action=argparse.BooleanOptionalAction, default=None, help="Finish all images across DPs before rendering text; use full frontend pools")
     parser.add_argument("--full-frontend-pools", action="store_true", help="Size each frontend pool to cover the DP core mask")

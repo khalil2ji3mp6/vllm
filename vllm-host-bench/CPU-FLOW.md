@@ -30,7 +30,7 @@
 | 请求与文本前处理 | [preprocess_requests、MeasuredRenderer](frontend.py) → Schema 和采样参数 → OnlineRenderer → Chat Template、分词 → InputProcessor、OutputProcessor 建状态。[RC5 适配器](tokenizer_rc5.py) 返回 Python token ID 列表 | 每前端一个 uvloop 事件循环。校验、建状态在主线程，模板和分词交给 renderer 线程池。每个前端有独立解释器，同进程 Python 代码和 ID 列表构造受到 GIL 约束 |
 | 图片接入与处理 | 校验后 await [ImageCodec.decode_request](image_codec.py) → MediaConnector → Base64 解码、Pillow 解压与 RGB 转换，随后继续同一请求的文字渲染 | 每前端使用媒体池。不同请求由 asyncio.gather 并发推进，重叠模式下图片与别的请求的文字可以重叠；同一请求先完成图片再进行文字渲染。图片在本地内存中，独立编码参考轮位于业务计时之外 |
 | 进程通信与入队 | 前端将 32K 请求序列化，通过 ZMQ PAIR 交给 EngineCore；引擎反序列化、计算块哈希并入队。调度结果通过 SHM MessageQueue 下发，worker 返回固定结果，引擎再将输出发给所属前端。[timed_scenario](bench.py) · [run_worker](worker.py) | 每 DP 一个引擎消费者。引擎对本步 worker 回复进行同步等待，主表通信分组统计收发和解包等已打点区间。完整等回复时间在细表，含对端准备数据的时间 |
-| 引擎调度与请求状态 | [build_scheduler、add、classify](engine.py) → Scheduler.schedule → 分配 token 预算和逻辑 KV 块 → 收到 worker 结果 → update_from_output → 释放或继续调度 | 每 DP 一个同步调度循环，默认最多 32 条活动序列、每步 16,384 token 预算。自动逻辑 KV 块预算按可同时运行的序列及输入输出长度计算，保留一个空块，至少 8,192 块。32 条 32K 输入 / 1K 输出在块长 128 时分配 8,449 块。基准显式设 `async_scheduling=False`，当前步结果更新后再调下一步 |
+| 引擎调度与请求状态 | [build_scheduler、add、classify](engine.py) → Scheduler.schedule → 分配 token 预算和逻辑 KV 块 → 收到 worker 结果 → update_from_output → 释放或继续调度 | 每 DP 一个同步调度循环，整网默认最多 48 条活动序列、每步 16,384 token 预算。自动逻辑 KV 块预算按可同时运行的序列及输入输出长度计算，保留一个空块，至少 8,192 块。48 条 32K 输入 / 1K 输出在块长 128 时分配 12,673 块。基准显式设 `async_scheduling=False`，当前步结果更新后再调下一步 |
 | Worker 输入准备 | [CpuBatch.update、CpuBatch.prepare](worker.py) 维护请求与块表，组装 IDs、位置、序列长度和索引；[dummy_result](engine.py) 生成固定返回 token | 每 DP / TP rank 一个 worker。TP1 时同一时刻每个 DP 只有一份 worker 在处理这一步。输入数组在 CPU 上构造，不加载模型权重或启动设备算子 |
 | 输出处理与响应 | [stream_outputs、serialize_chunks](frontend.py) 解包返回，增量反分词、检查停止串、序列化本地流式响应，并记录首次及最终 token 的时间 | 每前端主事件循环处理本前端的输出。不同前端可并行；同一请求的下个 token 依赖上一步，1,024 个输出无法靠扩大 renderer 池同时完成 |
 
@@ -75,9 +75,9 @@
 
 ```bash
 ./run-stages.sh --core-sweep 1 64 192 --out stages-scaling
-./run.sh --dp 1 --core-sweep 1 64 192 --max-num-seqs 20 --keep-diagnostics --out dp1-scaling
-./run.sh --dp 8 --core-sweep 64 192 --max-num-seqs 20 --keep-diagnostics --out dp8-scaling
-./run.sh --dp 8 --core-sweep 64 192 --new-tokens 1 --max-num-seqs 20 --keep-diagnostics --out dp8-short
+./run.sh --dp 1 --core-sweep 1 64 192 --concurrency-per-replica 32 --max-num-seqs 20 --keep-diagnostics --out dp1-scaling
+./run.sh --dp 8 --core-sweep 64 192 --concurrency-per-replica 32 --max-num-seqs 20 --keep-diagnostics --out dp8-scaling
+./run.sh --dp 8 --core-sweep 64 192 --new-tokens 1 --concurrency-per-replica 32 --max-num-seqs 20 --keep-diagnostics --out dp8-short
 ```
 
 ## 图片和文本分阶段的整机对照
