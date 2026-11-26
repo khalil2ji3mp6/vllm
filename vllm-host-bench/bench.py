@@ -515,8 +515,8 @@ def parse_args():
     p.add_argument("--hit-tokens", type=int, default=16384)
     p.add_argument("--chunk-tokens", type=int, default=16384)
     p.add_argument("--block-size", type=int, default=128)
-    p.add_argument("--blocks", type=int, default=8192)
-    p.add_argument("--max-num-seqs", type=int, default=20)
+    p.add_argument("--blocks", type=int, help="Override the automatic logical KV block budget")
+    p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--max-model-len", type=int, default=135000)
     p.add_argument("--affinity", choices=("compact", "numa", "inherit"), default="compact")
     p.add_argument("--numa-node", type=int, help="Restrict compact binding to this Linux NUMA node ID")
@@ -540,9 +540,16 @@ def parse_args():
         p.error("A round gate needs a replica ID and positive timeout")
     if args.numa_node is not None and (args.affinity != "compact" or args.numa_node < 0):
         p.error("--numa-node needs --affinity compact and a nonnegative node ID")
-    if min(args.tp, args.blocks, args.prompt_tokens, args.new_tokens, args.concurrency,
+    if min(args.tp, args.max_num_seqs, args.prompt_tokens, args.new_tokens, args.concurrency,
            args.block_size, args.chunk_tokens, args.runs, args.timeout) < 1 or args.warmup < 0:
         p.error("Counts must be positive and warmup nonnegative")
+    if args.blocks is None:
+        # Each live sequence can grow to its output limit. vLLM reserves one null block.
+        tokens = args.prompt_tokens + args.new_tokens
+        blocks_per_seq = (tokens + args.block_size - 1) // args.block_size
+        args.blocks = max(8192, 1 + min(args.concurrency, args.max_num_seqs) * blocks_per_seq)
+    elif args.blocks < 1:
+        p.error("--blocks must be positive")
     if any(n is not None and n < 1 for n in
            (args.api_server_count, args.renderer_num_workers, args.media_loading_threads)):
         p.error("Frontend process and thread counts must be positive")

@@ -46,7 +46,7 @@ class Cases:
             max_model_len=135000,
             renderer_num_workers=render_threads,
             block_size=128,
-            max_num_seqs=20,
+            max_num_seqs=32,
             chunk_tokens=16384,
             tp=1,
             blocks=8192,

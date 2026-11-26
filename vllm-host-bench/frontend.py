@@ -204,10 +204,6 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
         await asyncio.sleep(0)
     if len(first_token_ns) != request_count or len(finished_ns) != request_count:
         raise RuntimeError("Missing first token or completion timestamp")
-    # Batch start to first token includes admission delays behind already decoding requests.
-    for rid, first in first_token_ns.items():
-        clock.rows["prefill", "request_phase_lifetime"].append((batch_start_ns, batch_start_ns + first, 0))
-        clock.rows["decode", "request_phase_lifetime"].append((batch_start_ns + first, batch_start_ns + finished_ns[rid], 0))
     return emitted, serialized_bytes, list(first_token_ns.values()), list(finished_ns.values())
 
 

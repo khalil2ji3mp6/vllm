@@ -6,7 +6,6 @@ IPC = "进程通信与入队"
 ENGINE = "引擎调度与请求状态"
 WORKER = "Worker 输入准备"
 OUTPUT = "输出处理与响应"
-TOTAL = "阶段整体"
 
 MICRO = {
     "text_request": (TEXT, "32K 请求"),
@@ -49,7 +48,6 @@ TARGETS = {
         ("frontend", "detokenize_and_stop_strings"),
         ("frontend", "serialize_stream_chunks"),
     ],
-    TOTAL: [("frontend", "request_phase_lifetime")],
 }
 
 

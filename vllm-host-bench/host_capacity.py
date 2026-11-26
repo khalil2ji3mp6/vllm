@@ -271,6 +271,8 @@ def main():
     parser.add_argument("--concurrency-per-replica", type=int, default=32)
     parser.add_argument("--prompt-tokens", type=int, default=32768)
     parser.add_argument("--new-tokens", type=int, default=1024)
+    parser.add_argument("--blocks", type=int, help="Override each DP logical KV block budget")
+    parser.add_argument("--max-num-seqs", type=int, default=32, help="Maximum running sequences per DP")
     parser.add_argument("--chunk-tokens", type=int, default=16384)
     parser.add_argument("--request-file", type=Path)
     media = parser.add_mutually_exclusive_group()
@@ -301,6 +303,10 @@ def main():
     if args.cores_per_replica is not None and args.cores_per_replica < 1:
         parser.error("--cores-per-replica must be positive")
     args.use_all_cores = args.cores_per_replica is None
+    if args.blocks is not None and args.blocks < 1:
+        parser.error("--blocks must be positive")
+    if args.max_num_seqs < 1:
+        parser.error("--max-num-seqs must be positive")
     if args.concurrency_per_replica < 1:
         parser.error("--concurrency-per-replica must be positive")
     api_per_replica = None
@@ -412,10 +418,13 @@ def run_capacity(args, plan, root):
                    "--api-server-count", str(frontend["api_server_count"]),
                    "--renderer-num-workers", str(frontend["renderer_num_workers"]),
                    "--prompt-tokens", str(args.prompt_tokens), "--new-tokens", str(args.new_tokens),
+                   "--max-num-seqs", str(args.max_num_seqs),
                    "--chunk-tokens", str(args.chunk_tokens), "--warmup", str(args.warmup),
                    "--runs", str(args.runs), "--timeout", str(args.timeout),
                    "--round-timeout", str(args.round_timeout), "--round-gate", str(gates),
                    "--replica-id", str(i), "--out", str(directory)]
+            if args.blocks is not None:
+                cmd.extend(["--blocks", str(args.blocks)])
             if args.request_file:
                 cmd.extend(["--request-file", str(args.request_file.resolve())])
             if args.image_file:

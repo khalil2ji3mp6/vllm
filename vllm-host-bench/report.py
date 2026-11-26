@@ -3,10 +3,11 @@ import argparse
 import csv
 import json
 from collections import defaultdict
+from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 
-from flow_groups import TARGETS, TOTAL, groups
+from flow_groups import TARGETS, TEXT, groups
 
 
 def point(process, stage):
@@ -205,7 +206,7 @@ def write_detail_tables(columns, out, case="cold"):
 
 def write_stage_tables(columns, out, case="cold", diagnostics=False):
     # Retained pre-group summaries can still be rendered using their original schema.
-    if TOTAL not in columns[0][1][0]["stage_intervals"][case][0]["Prefill"]:
+    if TEXT not in columns[0][1][0]["stage_intervals"][case][0]["Prefill"]:
         return write_detail_tables(columns, out, case)
     if diagnostics:
         detail = out / "details"
@@ -236,6 +237,12 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
     for phase in ("Prefill", "Decode"):
         rows = [("流程", *headings)]
         rows.extend((g, *(v[phase,g] for v in result)) for g in groups(phase))
+        # Sum the displayed precision so the CSV and Markdown can be checked by hand.
+        totals = []
+        for column in result:
+            amounts = [column[phase, g] for g in groups(phase) if column[phase, g] != "—"]
+            totals.append(f"{sum(map(Decimal, amounts)):.2f}" if amounts else "—")
+        rows.append(("阶段合计", *totals))
         with (out / f"{phase.lower()}.csv").open("w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerows(rows)
         lines.extend([f"## {phase}", "", "| " + " | ".join(rows[0]) + " |",
