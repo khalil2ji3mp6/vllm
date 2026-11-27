@@ -4,26 +4,24 @@
 
 ## 从宿主机分核到一个 DP
 
-1. `run.sh` 进入 [host_capacity.py](host_capacity.py) 的 `main`。进程从当前 Linux affinity 掩码取可用 CPU，按 sysfs 的 `thread_siblings_list` 每物理核只选一个逻辑 CPU，按 NUMA 节点建池。外部 `taskset` 会缩小这个集合。选择逻辑没有按节点的可用内存容量过滤。[cpu_topology.py](cpu_topology.py)
-2. 默认整机全核路径用 `distribute_all_cores` 分配不相交的 DP 核组；显式 `--core-sweep N` 为每 DP 分配等宽的 `N/DP` 个核，按节点轮流取可容纳完整组的 CPU，最后才合并各节点剩余 CPU。整网每档总核数须为 DP 的正整数倍。DP8 的最小值是 8 核，即每 DP 一核；整机一核使用 DP1。单流程的 1 核没有这个 DP8 约束。[capacity_plan、make_plan 和 run_capacity](host_capacity.py)
+1. `run.sh` 进入 [host_capacity.py](host_capacity.py) 的 `main`。进程从当前 Linux affinity 掩码取可用 CPU，按 sysfs 的 `thread_siblings_list` 每物理核只选一个逻辑 CPU，按 NUMA 节点建池。外部 `taskset` 会缩小这个集合。海光限定 NUMA 2、6，每节点最多 16 个物理核，内存分配遵循系统策略。[cpu_topology.py](cpu_topology.py)
+2. 默认逐档测 8、16、32 核。`--use-all-cores` 用 `distribute_all_cores` 分配不相交的 DP 核组。`--core-sweep N` 为每 DP 分配等宽的 `N/DP` 个核，按节点轮流取可容纳完整组的 CPU，最后才合并各节点剩余 CPU。整网每档总核数须为 DP 的正整数倍。DP8 的最小值是 8 核，即每 DP 一核。单流程的 1 核没有这个 DP8 约束。[capacity_plan、make_plan 和 run_capacity](host_capacity.py)
 3. 父进程用 `taskset -c <该 DP 的 CPU 列表> run-native.sh ...` 分别启动副本，副本的主进程运行 EngineCore，通过 spawn 启动本地前端和 TP worker。常用的 `inherit` 模式让子进程和其线程继承整组核，Linux 在组内调度。固定每副本核数恰为 `TP+2` 且允许单前端时，规划器可选 `compact`，分别给引擎、前端和各 worker 一个核。整网默认只设 CPU affinity，内存遵循系统的内存策略。引擎、每个前端和 worker 的主线程实际掩码保存在各副本 summary 的 hardware 字段。[启动和角色绑核](bench.py)
 4. 整机控制器为每一轮同步放行各 DP，排除预热。每 DP 自己接收固定数量的请求和运行自己的 Scheduler。这里模拟 8 个独立本地副本；跨 DP 的生产负载均衡、卡侧计算和集合通信没有计时。
 
 ### 自动前端参数
 
-当前默认分阶段运行，两个池的线程槽数均为 ⌈min(C,Q)/F⌉。下表对应默认 Q=48。重叠模式（`--no-separate-image-text`）另用下面的池预算。
+当前默认分阶段运行，两个池的线程槽数均为 ⌈min(C,Q)/F⌉。下表对应默认 Q=16。重叠模式（`--no-separate-image-text`）另用下面的池预算。
 
 每个 DP 的物理核数为 C，在途请求数为 Q。共享核组下，前端预算 B 取 max(1, C − TP − 1)。前端进程数 F 取 max(1, min(⌊B/4⌋, ⌈Q/16⌉))。重叠模式下每个前端的 renderer 池容量取 min(⌈Q/F⌉, max(1, ⌊(B−F)/F⌋))，有图片时媒体池默认用同样的容量。预算中的减法只用于算池大小，inherit 模式并没有给引擎和 worker 划出专属 CPU。前端按请求序号轮转分片，每条请求从输入到流式输出由同一个前端负责。[frontend_plan](bench.py) · [front_worker](frontend.py)
 
 | 总物理核 / DP | 每 DP 核组 | 每 DP 前端进程 | 每前端 renderer / 媒体线程槽 | 整机 EngineCore / worker |
 |---|---:|---:|---:|---:|
-| 1 / DP1 | 1 | 1 | 1 / 1 | 1 / 1 |
+| 8 / DP8 | 1 | 1 | 1 / 1 | 8 / 8 |
+| 16 / DP8 | 2 | 1 | 2 / 2 | 8 / 8 |
 | 32 / DP8 | 4 | 1 | 4 / 4 | 8 / 8 |
-| 64 / DP8 | 8 | 1 | 8 / 8 | 8 / 8 |
-| 128 / DP8 | 16 | 3 | 6 / 6 | 8 / 8 |
-| 192 / DP8 | 24 | 3 | 8 / 8 | 8 / 8 |
 
-表中 TP1、Q=48、有图。分词线程按请求并行，同一 API 的校验与建状态共用该进程的事件循环。默认 Torch 算子线程和数值库的内部线程预算为 1。Python 事件循环、线程池与 ZeroMQ 等库的辅助线程另计。线程槽为并发上限，实际同时执行的线程数和整轮平均占核都需要从运行数据读取。
+表中 TP1、Q=16、有图。分词线程按请求并行，同一 API 的校验与建状态共用该进程的事件循环。默认 Torch 算子线程和数值库的内部线程预算为 1。Python 事件循环、线程池与 ZeroMQ 等库的辅助线程另计。线程槽为并发上限，实际同时执行的线程数和整轮平均占核都需要从运行数据读取。
 
 ## 一条请求如何通过六个阶段
 
@@ -32,7 +30,7 @@
 | 请求与文本前处理 | [preprocess_requests、MeasuredRenderer](frontend.py) → Schema 和采样参数 → OnlineRenderer → Chat Template、分词 → InputProcessor、OutputProcessor 建状态。[RC5 适配器](tokenizer_rc5.py) 返回 Python token ID 列表 | 每前端一个 uvloop 事件循环。校验、建状态在主线程，模板和分词交给 renderer 线程池。每个前端有独立解释器，同进程 Python 代码和 ID 列表构造受到 GIL 约束 |
 | 图片接入与处理 | 校验后 await [ImageCodec.decode_request](image_codec.py) → MediaConnector → Base64 解码、Pillow 解压与 RGB 转换，随后继续同一请求的文字渲染 | 每前端使用媒体池。不同请求由 asyncio.gather 并发推进，重叠模式下图片与别的请求的文字可以重叠；同一请求先完成图片再进行文字渲染。图片在本地内存中，独立编码参考轮位于业务计时之外 |
 | 进程通信与入队 | 前端将 32K 请求序列化，通过 ZMQ PAIR 交给 EngineCore；引擎反序列化、计算块哈希并入队。调度结果通过 SHM MessageQueue 下发，worker 返回固定结果，引擎再将输出发给所属前端。[timed_scenario](bench.py) · [run_worker](worker.py) | 每 DP 一个引擎消费者。引擎对本步 worker 回复进行同步等待，主表通信分组统计收发和解包等已打点区间。完整等回复时间在细表，含对端准备数据的时间 |
-| 引擎调度与请求状态 | [build_scheduler、add、classify](engine.py) → Scheduler.schedule → 分配 token 预算和逻辑 KV 块 → 收到 worker 结果 → update_from_output → 释放或继续调度 | 每 DP 一个同步调度循环，整网默认最多 48 条活动序列、每步 16,384 token 预算。自动逻辑 KV 块预算按可同时运行的序列及输入输出长度计算，保留一个空块，至少 8,192 块。48 条 32K 输入 / 1K 输出在块长 128 时分配 12,673 块。基准显式设 `async_scheduling=False`，当前步结果更新后再调下一步 |
+| 引擎调度与请求状态 | [build_scheduler、add、classify](engine.py) → Scheduler.schedule → 分配 token 预算和逻辑 KV 块 → 收到 worker 结果 → update_from_output → 释放或继续调度 | 每 DP 一个同步调度循环，整网默认最多 16 条活动序列、每步 16,384 token 预算。自动逻辑 KV 块预算按可同时运行的序列及输入输出长度计算，保留一个空块，至少 8,192 块。16 条 32K 输入 / 1K 输出在块长 128 时使用默认下限 8,192 块。基准显式设 `async_scheduling=False`，当前步结果更新后再调下一步 |
 | Worker 输入准备 | [CpuBatch.update、CpuBatch.prepare](worker.py) 维护请求与块表，组装 IDs、位置、序列长度和索引；[dummy_result](engine.py) 生成固定返回 token | 每 DP / TP rank 一个 worker。TP1 时同一时刻每个 DP 只有一份 worker 在处理这一步。输入数组在 CPU 上构造，不加载模型权重或启动设备算子 |
 | 输出处理与响应 | [stream_outputs、serialize_chunks](frontend.py) 解包返回，增量反分词、检查停止串、序列化本地流式响应，并记录首次及最终 token 的时间 | 每前端主事件循环处理本前端的输出。不同前端可并行；同一请求的下个 token 依赖上一步，1,024 个输出无法靠扩大 renderer 池同时完成 |
 

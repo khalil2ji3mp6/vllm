@@ -8,84 +8,31 @@
 ./run-suite.sh && cat host-bench-results/latest.md
 ```
 
-脚本自动识别海光 x86 或 ARM，按顺序运行原版单算子、原版整网和新版单算子。自动选核覆盖 1、32、64 和当前可用的全部物理核。整网的 1 核单独用 DP1，其他档位用 DP8。海光每组额外测试 NUMA 2、6 各 16 核。请从可使用整机 CPU 的 shell 运行。每次运行的原始表格、日志和汇总保存在独立目录，全部成功后更新 `host-bench-results/latest.md`。
+| 测试 | 物理核数 | 负载 |
+|---|---|---|
+| 原版单算子 | 1、8、16、32 | 文本前处理和图片处理，每个物理核一个独立进程 |
+| 整网 | 8、16、32 | DP8/TP1，每 DP 固定 16 个请求，整机并发 128 |
+| 新版 worker 单算子 | 1 | Prefill 6 项、Decode 11 项，输出每次耗时和占比 |
 
-### 1. 整网
+海光所有档位都从 NUMA 2、6 各 16 个物理核组成的核池中选取。1 核使用节点 2 的第一个可用物理核；8、16、32 核分别在两个节点各取 4、8、16 核。脚本按进程可见的拓扑选核，完整套件要求两个节点各有 16 核可用。内存分配沿用系统策略。ARM 在调用进程允许的 NUMA 节点间选取物理核。套件及下列独立入口均遵守海光核池限制。每次运行保存在独立目录，三组完成后更新 `host-bench-results/latest.md`。
 
-```bash
-./run.sh                         # 全部可用物理核
-./run.sh --core-sweep 32         # 仅测 32 个物理核
-```
-
-默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 48、最多 48 条活动序列（整机并发 384），每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。完整 Prefill 和 Decode 阶段表见 `host-auto/coverage.md`。
-
-三组结果均逐行标出多核配置下的并行位置，1 核列为单核基线。原版单算子默认每物理核运行独立进程，测跨任务吞吐。整网标明 renderer、媒体线程池、API 事件循环和 DP worker 的边界。整网的文本行包含请求排队，在表后单列分词执行、线程池排队及其他前端执行与等待，三项按完成请求数求均值。
-
-默认 DP8 时，整网指定的核数须为 8 的倍数。32 核对应每 DP 4 核。
-
-### 2. 单流程
-
-默认只测请求与文本前处理、图片接入与处理。
+### 分别运行
 
 ```bash
-./run-stages.sh                       # 默认测单核和全部可用物理核
-./run-stages.sh --core-sweep 1 32     # 仅测 1 核和 32 核两档
+./run-stages.sh                   # 原版单算子，1 / 8 / 16 / 32 核
+./run.sh                          # 整网，8 / 16 / 32 核
+./run-stages.sh --runner-profile  # 新版单算子，仅 1 核
 ```
 
-结果见 `stages/stages.md`。仅需 32 核一档时使用 `--core-sweep 32`。定位其他阶段时用 `--stages` 点名，例如测两段 IPC 和引擎调度：
+单独选档可用 `./run.sh --core-sweep 16` 或 `./run-stages.sh --core-sweep 8 16`。原版单算子的报告为 `stages.md`，整网的两张表在 `coverage.md`，新版单算子的两张表在 `runner-profile.md`。进程通信等定位用例可通过原版入口的 `--stages` 单独指定。
 
-```bash
-./run-stages.sh --stages frontend_ipc worker_ipc drive_scheduler --core-sweep 32
-```
+### 整网并发与线程
 
-### 3. 两台机器固定两个 NUMA 节点，各取 16 个物理核
+每个请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。各档均为 8 个 DP，每个 DP 一个 API、一个 EngineCore 和一个 TP1 worker，最多 16 条活动序列。8、16、32 核分别给每个 DP 1、2、4 个物理核。每 API 的 renderer 池和媒体池容量也分别为 1、2、4；先处理图片，再渲染文本，各角色共享该 DP 核集。线程池容量表示并发上限。固定请求量使不同档位的吞吐和单请求耗时可直接对照。新增核心有助于不同请求并行和进程间调度，同一 DP 内连续 Decode 步依序执行。
 
-先在各自机器的 shell 设置核号。海光 x86 使用节点 2、6。以下编号以该机 `lscpu -e=CPU,NODE,SOCKET,CORE` 的映射为准：
+### Ascend V1 worker 分步测试
 
-```bash
-CPUS=32-47,96-111
-ARCH=x86
-```
-
-ARM 使用节点 0、1。按本机拓扑每个物理核取一个逻辑 CPU，避开重复计算 SMT 线程：
-
-```bash
-CPUS=$(PYTHONPATH=vllm-host-bench vllm-host-bench/.venv/bin/python - <<'PYTHON'
-from cpu_topology import cpu_topology
-
-topo = cpu_topology()
-physical = set(topo["physical_core_cpus"])
-selected = []
-for node in (0, 1):
-    cores = [cpu for cpu in topo["numa_nodes"].get(node, []) if cpu in physical]
-    if len(cores) < 16:
-        raise SystemExit(f"NUMA 节点 {node} 可用物理核不足 16 个")
-    selected.extend(cores[:16])
-print(",".join(map(str, selected)))
-PYTHON
-)
-ARCH=arm
-```
-
-两台机器各自在同一个 shell 执行以下两条命令。`taskset` 将测试进程绑定到选定的 CPU，内存分配沿用系统策略。
-
-```bash
-taskset -c "$CPUS" ./run-stages.sh --core-sweep 1 32 --out "stages-${ARCH}-local32"
-taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARCH}-local32"
-```
-
-两个脚本重复运行都会创建带数字后缀的目录。
-
-### 4. 按 Ascend V1 worker 步骤统计
-
-```bash
-./run-stages.sh --runner-profile --core-sweep 1 32 --out runner-stages
-./run.sh --runner-profile --core-sweep 32 --out runner-host
-```
-
-两个脚本加 `--runner-profile` 都输出 Prefill 和 Decode 两张表。worker 的 Prefill 有 6 项，Decode 有 11 项。单算子 Prefill 还单列前端 Tokenizer，每个 API 使用与整网相同的 vLLM renderer 线程池、RC5 分词器和预渲染的 32K 输入，48 个请求/DP 同批提交。单请求执行时间从线程开始分词计到导出 IDs 完成，整批吞吐用完成请求数除以第一个 API 开始到最后一个 API 完成的墙钟。表中吞吐取各测量轮的中位数。worker 占比只用该阶段 worker 各项未舍入的调用均值计算。单算子 Decode 的前六项来自普通单 token 步，后五项来自投机验证样本，合计是跨样本均值之和。整网按实际执行的 worker 步统计，Prefill 包含混合步，Decode 仅含纯 Decode 步，未执行的行显示 `—`。结果见输出目录下的 `runner-profile.md`，按样本拆分的调用次数和墙钟纳秒总和见 `runner-profile.json`。省略该参数时分别运行原单算子或整网基准。
-
-单算子 runner 在 1 核运行一个 worker，在 32、64、128、192 核运行 8 个 TP1 worker，每个共享所属 DP 的核集。模板与分词可跨请求并行，runner 的一次同步步沿单条调用链执行。NumPy 向量化与使用更多 CPU 线程是两个不同维度，此工作负载将 Torch intra-op 设为 1。worker 吞吐按所有 DP 的实测完成数和共同墙钟计算，包含循环开销及样本还原，单次耗时仅覆盖行内操作。前端线程重叠峰值只反映同时处于调用区间的线程数。分词适配器导出 32K 个 Python IDs 时共享每进程的 GIL；可用 `./run-stages.sh --layouts threads --stages tokenize_native ids_export tokenize --core-sweep 32 64` 在同一线程布局下分别观察原生 encode、已有 Encoding 导出 IDs 和完整调用。[vLLM renderer 执行器](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/renderers/base.py#L111)
+新版单算子直接使用原请求的 32K token IDs，跳过前端 Tokenizer、模板、媒体和入队。真实分词仍属于原版单算子和整网的文本前处理。占比分母取本阶段 worker 各实测项未舍入均值之和。单算子 Decode 前六项使用普通步，后五项使用独立投机样本。另可通过 `./run.sh --runner-profile --core-sweep 32` 在整网工作负载采集 worker 步骤。整网 Prefill 含混合步，未执行的行标为 `—`。
 
 worker 单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
 
@@ -112,7 +59,7 @@ worker 单算子为单序列固定输入，分别回放首次 16K-token Prefill 
 
 #### 单算子补测的五个 Host 子段
 
-`./run-stages.sh --runner-profile --core-sweep 1 32 --keep-diagnostics` 同时测普通输入和投机验证。投机样本固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。五项独立回放同一个投机样本，在 Decode 表中与前六项共用分母。
+`./run-stages.sh --runner-profile --core-sweep 1 --keep-diagnostics` 同时测普通输入和投机验证。投机样本固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。五项独立回放同一个投机样本，在 Decode 表中与前六项共用分母。
 
 | 单算子 | 此版本具体计时 |
 |---|---|

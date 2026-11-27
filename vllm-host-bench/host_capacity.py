@@ -15,10 +15,10 @@ from statistics import median
 from time import monotonic, sleep
 
 from bench import frontend_plan
-from cpu_topology import cpu_topology
+from cpu_topology import benchmark_topology
 from report import write_stage_tables
 
-STANDARD_CORE_SWEEP = (48, 96, 192)
+STANDARD_CORE_SWEEP = (8, 16, 32)
 
 
 def distribute_all_cores(pools, count):
@@ -266,14 +266,14 @@ def main():
     packing.add_argument("--cores-per-replica", type=int,
                          help="Fixed physical cores per replica; TP + 2 pins each main role")
     packing.add_argument("--use-all-cores", action="store_true",
-                         help="Spread all available physical cores over the replicas (default)")
+                         help="Spread all available physical cores over the replicas")
     packing.add_argument("--core-sweep", nargs="*", type=int,
                          help=f"Measure total physical cores (default: {' '.join(map(str, STANDARD_CORE_SWEEP))})")
-    parser.add_argument("--concurrency-per-replica", type=int, default=48)
+    parser.add_argument("--concurrency-per-replica", type=int, default=16)
     parser.add_argument("--prompt-tokens", type=int, default=32768)
     parser.add_argument("--new-tokens", type=int, default=1024)
     parser.add_argument("--blocks", type=int, help="Override each DP logical KV block budget")
-    parser.add_argument("--max-num-seqs", type=int, default=48, help="Maximum running sequences per DP")
+    parser.add_argument("--max-num-seqs", type=int, help="Maximum running sequences per DP (default: concurrency per replica)")
     parser.add_argument("--chunk-tokens", type=int, default=16384)
     parser.add_argument("--separate-image-text", action=argparse.BooleanOptionalAction, default=None, help="Finish all images across DPs before rendering text; use full frontend pools")
     parser.add_argument("--full-frontend-pools", action="store_true", help="Size each frontend pool to cover the DP core mask")
@@ -292,6 +292,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--round-timeout", type=int, default=900)
     args = parser.parse_args()
+    if args.max_num_seqs is None:
+        args.max_num_seqs = args.concurrency_per_replica
     if args.separate_image_text is None:
         # Preserve explicit overlap experiments and the text-only path.
         args.separate_image_text = not (args.full_frontend_pools or args.text_only
@@ -300,6 +302,10 @@ def main():
         args.full_frontend_pools = True
     if args.full_frontend_pools and (args.text_only or args.renderer_num_workers or args.media_loading_threads):
         parser.error("Full frontend pools require image input and automatic pool sizes")
+    if args.core_sweep is None and not (args.cores_per_replica or args.use_all_cores
+                                       or args.replicas != 8 or args.tp != 1 or args.api_server_count
+                                       or args.renderer_num_workers or args.media_loading_threads):
+        args.core_sweep = list(STANDARD_CORE_SWEEP)
     if args.core_sweep == []:
         args.core_sweep = list(STANDARD_CORE_SWEEP)
     if args.runner_profile and (args.tp != 1 or args.compare):
@@ -341,8 +347,8 @@ def main():
                                       any(n < args.replicas or n % args.replicas for n in args.core_sweep)):
         parser.error("Core sweep totals must be distinct positive multiples of DP")
 
-    topology = cpu_topology()
     try:
+        topology = benchmark_topology()
         if args.core_sweep is None:
             trials = [(args, make_plan(args, topology, api_per_replica))]
         else:

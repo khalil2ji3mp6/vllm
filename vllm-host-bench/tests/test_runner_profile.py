@@ -1,5 +1,6 @@
 """Regression checks for persistent rows and pooled exclusive timing."""
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
@@ -93,31 +94,54 @@ class RunnerChecks(unittest.TestCase):
             whole = write_tables({32: dict(prefill=ordinary, decode={})}, Path(directory))
             self.assertIn("| propose | propose | — | — | — |", whole)
 
-    def test_renderer_uses_service_roles_and_keeps_worker_sum(self):
-        from renderer_bench import service_plan
-        cpus = list(range(192))
-        topo = dict(allowed_cpus=cpus, physical_core_cpus=cpus,
-                    numa_nodes={i: cpus[i*48:(i+1)*48] for i in range(4)})
-        item = {"calls": 2, "wall_sum_ns": 4000, "ops_s": 123.4}
-        profiles = {}
-        for count, dp, apis, threads in ((1, 1, 1, 1), (32, 8, 1, 4),
-                                         (64, 8, 1, 8), (192, 8, 3, 8)):
-            plan = service_plan(topo, count)
-            self.assertEqual(len(plan["replicas"]), dp)
-            self.assertEqual(len({cpu for r in plan["replicas"] for cpu in r["cpus"]}), count)
-            for r in plan["replicas"]:
-                self.assertEqual((r["frontend"]["api_server_count"],
-                                  r["frontend"]["renderer_num_workers"]), (apis, threads))
-            profiles[count] = dict(service_plan=plan, prefill={MEASURED[0]: item}, decode={},
-                                   frontend_tokenizer=dict(calls=100, wall_sum_ns=1800000, ops_s=300,
-                                                           peak_by_api=[threads] * dp * apis))
-        uneven = service_plan(topo, 33)
-        self.assertEqual((uneven["dp_size"], uneven["assigned_physical_cores"]), (8, 33))
+    def test_worker_fixture_skips_tokenizer(self):
+        from stage_cases import Cases
+        with patch("stage_cases.GlmRc5Tokenizer", side_effect=AssertionError("unexpected tokenizer")):
+            fixture = Cases(["runner/prefill/worker_batch_update"], 1)
+        self.assertEqual(len(fixture.requests[0].prompt_token_ids), 32768)
+        self.assertEqual(fixture.ids_hash.hexdigest(),
+                         "edb6bccbc6d08dc652681680f6705adb5675ec579e948083c79919f694e01662")
+        item = dict(calls=2, wall_sum_ns=4000)
         with TemporaryDirectory() as directory:
-            md = write_tables(profiles, Path(directory))
-            self.assertIn("Tokenizer | 跨请求多核，renderer 线程池 | 18.00 | — | 300.00", md)
-            self.assertIn("_update_states | 跨 DP 并行，步内同步 | 2.00 | 100.00% | 123.40", md)
-            self.assertIn("192 核 8 DP × 3 API/DP × 8 线程/API", md)
+            md = write_tables({1: dict(dp_size=1, tp_size=1, prefill={MEASURED[0]: item},
+                                       decode={})}, Path(directory))
+        self.assertIn("_update_states | 2.00 | 100.00%", md)
+        self.assertNotIn("Tokenizer", md)
+        self.assertNotIn("多核配置", md)
+
+    def test_hygon_core_sweep_respects_memory_node_affinity(self):
+        from cpu_topology import benchmark_topology, hygon_pool
+        from host_capacity import make_plan
+
+        nodes = {i: list(range(i*16, (i+1)*16)) for i in range(8)}
+        cpus = list(range(128))
+        full = dict(physical_core_cpus=cpus, allowed_cpus=cpus, numa_nodes=nodes)
+        selected = nodes[2] + nodes[6]
+        scoped = dict(physical_core_cpus=selected, allowed_cpus=selected,
+                      numa_nodes={i: nodes[i] for i in (2, 6)})
+        with (patch("cpu_topology.cpu_topology", side_effect=[full, scoped]),
+              patch("cpu_topology.platform.machine", return_value="x86_64"),
+              patch("cpu_topology.Path.read_text", return_value="vendor_id: HygonGenuine"),
+              patch("cpu_topology.os.sched_setaffinity") as pin):
+            topo = benchmark_topology()
+        pin.assert_called_once_with(0, selected)
+        self.assertEqual(hygon_pool(dict(full, physical_core_cpus=[7, 33, 100])), [33, 100])
+        previous = set()
+        for total in (8, 16, 32):
+            width = total // 8
+            args = NS(replicas=8, cores_per_replica=width, tp=1, full_frontend_pools=True,
+                      concurrency_per_replica=16, text_only=False, renderer_num_workers=None,
+                      media_loading_threads=None)
+            replicas = make_plan(args, topo, None)["replicas"]
+            used = {c for r in replicas for c in r["cpus"]}
+            self.assertTrue(previous <= used <= set(selected))
+            self.assertEqual(len(used), total)
+            self.assertEqual(len(used.intersection(nodes[2])), total//2)
+            for r in replicas:
+                self.assertEqual(len(r["nodes"]), 1)
+                self.assertEqual(r["frontend"], dict(api_server_count=1, renderer_num_workers=width,
+                                                      media_loading_threads=width))
+            previous = used
 
     def test_mixed_counted_once_and_dropped_span_rejected(self):
         summary = {"parameters": {"tp": 1}, "workload": {"cold": [{"mixed_steps": 2, "decode_steps": 1}]}}

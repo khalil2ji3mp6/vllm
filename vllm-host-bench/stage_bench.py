@@ -17,7 +17,7 @@ from tempfile import TemporaryDirectory
 from threading import BrokenBarrierError
 from time import perf_counter_ns
 
-from cpu_topology import cpu_topology
+from cpu_topology import benchmark_topology
 from flow_groups import MICRO, MICRO_LAYOUTS
 from host_capacity import distribute_all_cores, reserve_output_dir
 from runner_report import MEASURED, PHASES, SPEC_ROWS, write_tables
@@ -182,14 +182,10 @@ def node(cpus, args, gate, deadline, directory):
         from vllm.utils.gc_utils import freeze_gc_heap
 
         cases = Cases(args.stages, len(cpus) if args.threaded else 1)
-        (directory / f"fixture-{cpus[0]}.json").write_text(
-            json.dumps(
-                {
-                    "token_ids_sha256": cases.ids_hash.hexdigest(),
-                    "image_sha256": hashlib.sha256(cases.raw).hexdigest(),
-                }
-            )
-        )
+        fixture = {"token_ids_sha256": cases.ids_hash.hexdigest()}
+        if not args.runner_profile:
+            fixture["image_sha256"] = hashlib.sha256(cases.raw).hexdigest()
+        (directory / f"fixture-{cpus[0]}.json").write_text(json.dumps(fixture))
         freeze_gc_heap()
         if args.runner_profile:
             import torch
@@ -360,7 +356,7 @@ def compare(paths):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runner-profile", action="store_true", help="Isolate host runner operations on fixed scheduler steps")
-    parser.add_argument("--core-sweep", nargs="+", default=["1", "all"])
+    parser.add_argument("--core-sweep", nargs="+", default=None)
     parser.add_argument("--stages", nargs="+", choices=CASES)
     parser.add_argument(
         "--layouts",
@@ -387,7 +383,11 @@ def main():
         return
     if args.rounds < 1 or not 0 < args.seconds < 240:
         parser.error("Use positive rounds and a sample window below 240 seconds")
-    topo = cpu_topology()
+    if args.core_sweep is None:
+        args.core_sweep = ["1"] if args.runner_profile else ["1", "8", "16", "32"]
+    if args.runner_profile and args.core_sweep != ["1"]:
+        parser.error("The isolated worker profile measures 1 physical core; use --core-sweep 1")
+    topo = benchmark_topology()
     physical = set(topo["physical_core_cpus"])
     # Spread each core count across available NUMA domains, one SMT sibling per core.
     pools = [[c for c in node if c in physical] for node in topo["numa_cpus"]]
@@ -442,26 +442,22 @@ def main():
         if args.keep_diagnostics:
             args.stages.append("runner/bookkeeping/parse_verified_ids")
         args.threaded = False
-        from renderer_bench import measure_tokenizer, service_plan
         profiles = {}
-        for count in counts:
-            service = service_plan(topo, count)
-            layout = [dp["cpus"] for dp in service["replicas"]]
-            plan = sample(layout, args, out)
-            profiles[count] = {"service_plan": service, "frontend_tokenizer": measure_tokenizer(service, args.rounds)}
-            for stage, result in plan["stages"].items():
-                _, phase, key = stage.split("/")
-                rounds = result["rounds"]
-                if any(r["active_lanes"] != len(layout) for r in rounds):
-                    raise RuntimeError(f"{stage}: some DP workers missed the window; increase --seconds")
-                profiles[count].setdefault(phase, {})[key] = {
-                    "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
-                    "calls": sum(r["operations"] for r in rounds),
-                    "ops_s": result["ops_s"],
-                }
-            if args.keep_diagnostics:
-                data["plans"][count] = plan
+        layout = [[ordered[0]]]
+        plan = sample(layout, args, out)
+        profiles[1] = {"cpu": ordered[0], "dp_size": 1, "tp_size": 1}
+        for stage, result in plan["stages"].items():
+            _, phase, key = stage.split("/")
+            rounds = result["rounds"]
+            if any(r["active_lanes"] != len(layout) for r in rounds):
+                raise RuntimeError(f"{stage}: some DP workers missed the window; increase --seconds")
+            profiles[1].setdefault(phase, {})[key] = {
+                "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
+                "calls": sum(r["operations"] for r in rounds),
+                "ops_s": result["ops_s"],
+            }
         if args.keep_diagnostics:
+            data["plans"][1] = plan
             (out / "stages.json").write_text(json.dumps(data, indent=2) + "\n")
         print(write_tables(profiles, out), end="")
         return

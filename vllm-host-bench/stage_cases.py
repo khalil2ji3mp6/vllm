@@ -52,6 +52,21 @@ class Cases:
             tp=1,
             blocks=8192,
         )
+        if self.runner_profile:
+            # The original request-0 GLM sample, already tokenized. The scheduler
+            # consumes the same IDs and returns the same fixed output token.
+            ids = ([154822, 154824, 154826, 25062, 287, 29905, 371, 25, 7487,
+                    154827, 1900, 220, 15, 13, 60359, 279, 18629, 13]
+                   + [1273] * 32748 + [154828, 154841])
+            self.ids_hash = hashlib.sha256(array("I", ids).tobytes())
+            self.token = 23745
+            self.engine_cfg = config(self.args, skip_tokenizer_init=True)
+            self.requests = [EngineCoreRequest(
+                request_id="0", external_req_id="0", prompt_token_ids=ids,
+                mm_features=None, sampling_params=sampling(), pooling_params=None,
+                arrival_time=0.0, lora_request=None, cache_salt=None, data_parallel_rank=None,
+            )]
+            return
         self.cfg = config(self.args, skip_tokenizer_init=False)
         self.tokenizer = GlmRc5Tokenizer(self.args.model_metadata)
         self.renderer = HfRenderer(self.cfg, self.tokenizer)
@@ -78,7 +93,7 @@ class Cases:
             for m in self.messages
         ]
         self.token = self.tokenizer.encode(" hello", add_special_tokens=False)[0]
-        if self.runner_profile or {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
+        if {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
             self.engine_cfg = config(self.args, skip_tokenizer_init=True)
         self.image_path = root / "assets/input.jpg"
         self.raw = self.image_path.read_bytes()

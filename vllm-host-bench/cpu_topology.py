@@ -1,5 +1,6 @@
 """Linux CPU affinity, NUMA nodes and physical-core representatives."""
 import os
+import platform
 from pathlib import Path
 
 
@@ -34,3 +35,23 @@ def cpu_topology(numa_node=None):
     representatives = set(physical.values())
     return dict(allowed_cpus=sorted(allowed), numa_cpus=nodes, numa_nodes=node_cpus,
                 physical_core_cpus=sorted(representatives))
+
+
+def hygon_pool(topology):
+    physical = set(topology["physical_core_cpus"])
+    # Node IDs are stable on the test server; Linux CPU numbers need not be.
+    return [cpu for node in (2, 6)
+            for cpu in sorted(physical.intersection(topology["numa_nodes"].get(node, ())))[:16]]
+
+
+def benchmark_topology():
+    topology = cpu_topology()
+    if platform.machine().lower() == "x86_64":
+        info = Path("/proc/cpuinfo").read_text().lower()
+        if "hygon" in info:
+            pool = hygon_pool(topology)
+            if not pool:
+                raise ValueError("CPU affinity contains no Hygon physical cores in NUMA nodes 2 and 6")
+            os.sched_setaffinity(0, pool)
+            topology = cpu_topology()
+    return topology
