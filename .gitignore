@@ -262,3 +262,4 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /vllm-host-offline-*/
 /vllm-host-bench/.host-src/
 /vllm-host-bench/.tools/
+/host-bench-results/
