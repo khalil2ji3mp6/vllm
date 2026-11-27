@@ -1,13 +1,14 @@
 """Regression checks for persistent rows and pooled exclusive timing."""
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 
 import bench  # noqa: F401 -- select the same CPU-only platform as run-stages.sh
 import torch
 
 from runner_host import RunnerHost
-from runner_report import MEASURED, collect_workers
+from runner_report import MEASURED, SPEC_ROWS, collect_workers, write_tables
 from worker import CpuBatch
 
 
@@ -74,6 +75,23 @@ class RunnerChecks(unittest.TestCase):
         self.assertEqual(descriptor.num_tokens, 4)
         self.assertEqual([t.tolist() for t in sample.propose()],
                          [[17], [32770], [0, 2], [0, 1]])
+
+    def test_two_tables_with_shared_decode_denominator(self):
+        # Every regular row averages 1 us. Each speculative row averages 2 us
+        # with a different sample count. Bookkeeping must not affect the sum.
+        ordinary = {k: {"calls": 2, "wall_sum_ns": 2000} for k in MEASURED}
+        spec = {k: {"calls": 3, "wall_sum_ns": 6000} for _, _, k in SPEC_ROWS}
+        phases = dict(prefill=ordinary, decode=ordinary, speculative=spec,
+                      bookkeeping={"parse_verified_ids": {"calls": 1, "wall_sum_ns": 999999}})
+        with TemporaryDirectory() as directory:
+            report = write_tables({1: phases, 32: phases}, Path(directory))
+            self.assertEqual([s for s in report.splitlines() if s.startswith("## ")],
+                             ["## Prefill", "## Decode"])
+            self.assertIn("32 核占比", report)
+            self.assertIn("| propose | propose | 2.00 | 12.50% | 2.00 | 12.50% |", report)
+            self.assertIn("| **16.00** | 100%", report)
+            whole = write_tables({32: dict(prefill=ordinary, decode={})}, Path(directory))
+            self.assertIn("| propose | propose | — | — |", whole)
 
     def test_mixed_counted_once_and_dropped_span_rejected(self):
         summary = {"parameters": {"tp": 1}, "workload": {"cold": [{"mixed_steps": 2, "decode_steps": 1}]}}

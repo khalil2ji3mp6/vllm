@@ -73,7 +73,7 @@ taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARC
 ./run.sh --runner-profile --core-sweep 32 --out runner-host
 ```
 
-整网的 `runner-profile.md` 保留图示的 11 行。单算子按输入条件输出普通 Prefill、普通 Decode 和投机 Decode 三张表。`runner-profile.json` 保存每行的调用次数和墙钟纳秒总和。Prefill 包含混合调度步，Decode 只含纯 Decode 步。表中时间为每次 worker 调度步该操作的平均墙钟 µs。整网合并所有 DP 和正式轮的出现次数，单算子合并所有独立物理核流水和正式轮的调用。占比的分母为同表各实测行均值之和。符号 `—` 表示此路径未执行。完整的进程通信、队列等待、前端和输出处理仍可用本页第 1 节的命令统计。
+两个脚本加 `--runner-profile` 都只输出 Prefill 和 Decode 两张表，分别含 6 项和 11 项。核数并排列出，每列按该阶段所有实测项的未舍入均值之和计算占比。单算子 Decode 的前六项来自普通单 token 步，后五项来自投机验证样本，合计是跨样本均值之和。整网按实际执行的 worker 步统计，Prefill 包含混合步，Decode 仅含纯 Decode 步，未执行的行显示 `—`。结果见输出目录下的 `runner-profile.md`，按样本拆分的调用次数和墙钟纳秒总和见 `runner-profile.json`。省略该参数时分别运行原单算子或整网基准。
 
 单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
 
@@ -100,13 +100,13 @@ taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARC
 
 #### 单算子补测的五个 Host 子段
 
-`./run-stages.sh --runner-profile --core-sweep 1 32 --keep-diagnostics` 同时测普通输入和投机验证。投机表固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。每行独立回放，共用相同的样本，占比为该行平均墙钟除以五行均值之和。
+`./run-stages.sh --runner-profile --core-sweep 1 32 --keep-diagnostics` 同时测普通输入和投机验证。投机样本固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。五项独立回放同一个投机样本，在 Decode 表中与前六项共用分母。
 
 | 单算子 | 此版本具体计时 |
 |---|---|
 | model_forward | 按 Ascend `_model_forward` 绑定调用参数，在目标模型 eager 路径按 GLM 配置遍历 78 层，执行每层的 token 维度和辅助输出检查。计算层、模块内部调度、算子下发和图回放均跳过。 |
 | compute logits | 对预置的 4 行投影结果执行 TP1 普通 LM head 路径的词表切片，生成共享存储的 tensor 视图。隐藏状态 gather 和矩阵乘跳过。 |
-| rej sample | 校验候选长度，用 vLLM `SamplingMetadata` 创建 bonus 采样参数并构造 `SamplerOutput`。设备采样及接受判定跳过。同步回包后还有一次真实 `RejectionSampler.parse_output`，开启 `--keep-diagnostics` 时独立报告它过滤占位符、导出 Python IDs 的时间。 |
+| rej sample | 校验候选长度，用 vLLM `SamplingMetadata` 创建 bonus 采样参数并构造 `SamplerOutput`。设备采样及接受判定跳过。同步回包后还有一次真实 `RejectionSampler.parse_output`，开启 `--keep-diagnostics` 时在 `runner-profile.json` 的 `bookkeeping` 中独立记录它过滤占位符、导出 Python IDs 的时间。 |
 | padding process for draft | 使用真实 vLLM 图规格 dispatcher，先按本地草稿长度查一次，再按协调后的长度查一次。独立 DP 下长度相同，基准设置 PIECEWISE 规格 1、4、8，2 个有效位置选中 4。计入 CPU 查表及描述符生成，未捕获或启动图。 |
 | propose | 选择插件支持的 CPU 紧凑草稿输入路径。执行上游 `prepare_next_token_ids_cpu`，根据拒绝数修正序列长度、重算 query 起点，生成保留 token 的索引。next ID 落在 CPU 上，索引和长度均有实际数值。草稿模型 forward、H2D 以及默认 padded GPU 路径不在本行。 |
 

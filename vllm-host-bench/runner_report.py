@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-# The first six rows execute host code. The last five have no fixture equivalent.
+# Whole-host workers measure these six rows. Isolated Decode also measures SPEC_ROWS.
 ROWS = (
     ("prepare_inputs", "_update_states", "worker_batch_update"),
     ("prepare_inputs", "prepare_inputs", "worker_cpu_metadata"),
@@ -10,13 +10,8 @@ ROWS = (
     ("prepare_inputs", "build attn metadata", "runner_attn"),
     ("prepare_inputs", "preprocess", "runner_preprocess"),
     ("set_ascend_forward_context", "set_ascend_forward_context", "runner_context"),
-    ("model_forward", "model_forward", None),
-    ("compute logits", "compute logits", None),
-    ("rej sample", "rej sample", None),
-    ("propose", "padding process for draft", None),
-    ("propose", "propose", None),
 )
-MEASURED = tuple(key for _, _, key in ROWS if key)
+MEASURED = tuple(key for _, _, key in ROWS)
 SPEC_ROWS = (
     ("model_forward", "model_forward", "model_forward"),
     ("compute logits", "compute logits", "compute_logits"),
@@ -54,27 +49,35 @@ def collect_workers(summaries):
 
 def write_tables(profiles, out: Path):
     sections = []
-    for cores, phases in profiles.items():
-        for phase, group in phases.items():
-            means = {k: v["wall_sum_ns"] / v["calls"] / 1000 for k, v in group.items() if v["calls"]}
-            if phase == "bookkeeping":
-                sections.append(f"采样后处理单算子 · {cores} 核 · parse_output "
-                                f"{means['parse_verified_ids']:,.2f} µs/步（独立计时）")
-                continue
-            total = sum(means.values())
-            rows = ROWS
-            title = phase.capitalize()
-            if "speculative" in phases:
-                rows = SPEC_ROWS if phase == "speculative" else ROWS[:len(MEASURED)]
-                if phase == "speculative":
-                    title = "投机 Decode 单算子 · 仅 Host 子段（B=1，K=3）"
-            lines = [f"## {title} · {cores} 核", "",
-                     "| 图示对应 | 步骤 | 耗时（µs/worker 步） | 耗时占比（%） |",
-                     "|---|---|---:|---:|"]
-            for parent, step, key in rows:
-                cells = f"{means[key]:,.2f} | {100 * means[key] / total:.2f}%" if key in means else "— | —"
-                lines.append(f"| {parent} | {step} | {cells} |")
-            sections.append("\n".join(lines))
+    for phase in PHASES:
+        rows = ROWS if phase == "prefill" else ROWS + SPEC_ROWS
+        header = ["图示对应", "步骤"]
+        columns = []
+        for cores, phases in profiles.items():
+            header.extend([f"{cores} 核耗时（µs/步）", f"{cores} 核占比"])
+            group = phases[phase]
+            if phase == "decode":
+                # Preserve the original fixtures in JSON. Only the displayed
+                # sum combines ordinary decode and isolated speculative calls.
+                group = group | phases.get("speculative", {})
+            means = {key: group[key]["wall_sum_ns"] / group[key]["calls"] / 1000
+                     for _, _, key in rows if key in group and group[key]["calls"]}
+            columns.append((means, sum(means.values())))
+        lines = [f"## {phase.capitalize()}", "", "| " + " | ".join(header) + " |",
+                 "|---|---|" + "---:|---:|" * len(columns)]
+        for parent, step, key in rows:
+            cells = [parent, step]
+            for means, total in columns:
+                if key in means:
+                    cells.extend([f"{means[key]:,.2f}", f"{100 * means[key] / total:.2f}%" if total else "—"])
+                else:
+                    cells.extend(["—", "—"])
+            lines.append("| " + " | ".join(cells) + " |")
+        cells = ["**合计**", "实测项均值之和"]
+        for means, total in columns:
+            cells.extend([f"**{total:,.2f}**" if means else "—", "100%" if total else "—"])
+        lines.append("| " + " | ".join(cells) + " |")
+        sections.append("\n".join(lines))
     report = "\n\n".join(sections) + "\n"
     (out / "runner-profile.json").write_text(json.dumps(profiles, indent=2) + "\n")
     (out / "runner-profile.md").write_text(report)
