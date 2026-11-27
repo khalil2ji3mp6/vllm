@@ -88,10 +88,36 @@ class RunnerChecks(unittest.TestCase):
             self.assertEqual([s for s in report.splitlines() if s.startswith("## ")],
                              ["## Prefill", "## Decode"])
             self.assertIn("32 核占比", report)
-            self.assertIn("| propose | propose | 2.00 | 12.50% | 2.00 | 12.50% |", report)
+            self.assertIn("| propose | propose | 跨 DP 并行，步内同步 | 2.00 | 12.50% | 2.00 | 12.50% |", report)
             self.assertIn("| **16.00** | 100%", report)
             whole = write_tables({32: dict(prefill=ordinary, decode={})}, Path(directory))
-            self.assertIn("| propose | propose | — | — |", whole)
+            self.assertIn("| propose | propose | — | — | — |", whole)
+
+    def test_renderer_uses_service_roles_and_keeps_worker_sum(self):
+        from renderer_bench import service_plan
+        cpus = list(range(192))
+        topo = dict(allowed_cpus=cpus, physical_core_cpus=cpus,
+                    numa_nodes={i: cpus[i*48:(i+1)*48] for i in range(4)})
+        item = {"calls": 2, "wall_sum_ns": 4000, "ops_s": 123.4}
+        profiles = {}
+        for count, dp, apis, threads in ((1, 1, 1, 1), (32, 8, 1, 4),
+                                         (64, 8, 1, 8), (192, 8, 3, 8)):
+            plan = service_plan(topo, count)
+            self.assertEqual(len(plan["replicas"]), dp)
+            self.assertEqual(len({cpu for r in plan["replicas"] for cpu in r["cpus"]}), count)
+            for r in plan["replicas"]:
+                self.assertEqual((r["frontend"]["api_server_count"],
+                                  r["frontend"]["renderer_num_workers"]), (apis, threads))
+            profiles[count] = dict(service_plan=plan, prefill={MEASURED[0]: item}, decode={},
+                                   frontend_tokenizer=dict(calls=100, wall_sum_ns=1800000, ops_s=300,
+                                                           peak_by_api=[threads] * dp * apis))
+        uneven = service_plan(topo, 33)
+        self.assertEqual((uneven["dp_size"], uneven["assigned_physical_cores"]), (8, 33))
+        with TemporaryDirectory() as directory:
+            md = write_tables(profiles, Path(directory))
+            self.assertIn("Tokenizer | 跨请求多核，renderer 线程池 | 18.00 | — | 300.00", md)
+            self.assertIn("_update_states | 跨 DP 并行，步内同步 | 2.00 | 100.00% | 123.40", md)
+            self.assertIn("192 核 8 DP × 3 API/DP × 8 线程/API", md)
 
     def test_mixed_counted_once_and_dropped_span_rejected(self):
         summary = {"parameters": {"tp": 1}, "workload": {"cold": [{"mixed_steps": 2, "decode_steps": 1}]}}

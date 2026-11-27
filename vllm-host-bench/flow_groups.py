@@ -7,6 +7,21 @@ ENGINE = "引擎调度与请求状态"
 WORKER = "Worker 输入准备"
 OUTPUT = "输出处理与响应"
 
+# Display only. JSON counters and interval lookups use the stable group names.
+SERVICE_LABELS = {
+    TEXT: "跨请求多核，模板与分词在线程池，校验与建状态在 API 事件循环",
+    IMAGE: "跨图片多核，媒体线程池",
+    IPC: "跨 DP 并行，各连接独立收发",
+    ENGINE: "跨 DP 并行，每个 Core 同步调度",
+    WORKER: "跨 DP 并行，每个 worker 步内同步",
+    OUTPUT: "跨 API 进程并行，每个事件循环同步处理",
+}
+MICRO_LAYOUTS = {
+    "plans": "跨任务多核，每物理核一个独立进程",
+    "thread_plans": "跨任务线程并发，共享进程内 GIL",
+    "ipc_plans": "跨 DP 收发对并行",
+}
+
 MICRO = {
     "text_request": (TEXT, "32K 请求"),
     "image_request": (IMAGE, "1024×1024 图"),

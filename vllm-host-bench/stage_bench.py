@@ -18,7 +18,7 @@ from threading import BrokenBarrierError
 from time import perf_counter_ns
 
 from cpu_topology import cpu_topology
-from flow_groups import MICRO
+from flow_groups import MICRO, MICRO_LAYOUTS
 from host_capacity import distribute_all_cores, reserve_output_dir
 from runner_report import MEASURED, PHASES, SPEC_ROWS, write_tables
 from stage_counters import Counters
@@ -59,6 +59,17 @@ THREAD_CASES = {
 }
 
 
+def micro_parallelism(stage, layout):
+    if layout == "thread_plans":
+        if stage == "tokenize_native":
+            return "跨请求多核，RC5 原生 encode"
+        if stage == "ids_export":
+            return "跨进程多核，每进程内导出 Python IDs 受 GIL 约束"
+        if stage == "tokenize":
+            return "原生 encode 跨请求多核，Python IDs 导出共享进程内 GIL"
+    return MICRO_LAYOUTS[layout]
+
+
 def current_mhz(cpu):
     path = Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq")
     try:
@@ -67,9 +78,9 @@ def current_mhz(cpu):
         return None
 
 
-def lane(cpu, cases, args, gate, deadline, directory):
+def lane(cpu, cases, args, gate, deadline, directory, mask=None):
     # A saturated microbenchmark lane differs from a service role sharing the whole DP mask.
-    os.sched_setaffinity(0, {cpu})
+    os.sched_setaffinity(0, mask if mask is not None else {cpu})
     counters = Counters()
     try:
         cases.initialize_lane(args.stages)
@@ -99,7 +110,7 @@ def lane(cpu, cases, args, gate, deadline, directory):
                     deadline.value = perf_counter_ns() + int(args.seconds * 1e9)
                 gate.wait()
                 stop = deadline.value
-                mhz = current_mhz(cpu)
+                mhz = current_mhz(cpu) if mask is None or len(mask) == 1 else None
                 pmu_start = counters.read()
                 before = resource.getrusage(resource.RUSAGE_THREAD)
                 start = perf_counter_ns()
@@ -180,6 +191,12 @@ def node(cpus, args, gate, deadline, directory):
             )
         )
         freeze_gc_heap()
+        if args.runner_profile:
+            import torch
+            torch.set_num_threads(1)
+            # A TP1 worker processes one scheduled batch on its DP mask.
+            lane(cpus[0], cases, args, gate, deadline, directory, mask=cpus)
+            return
         if not args.threaded and len(list(Path("/proc/self/task").iterdir())) != 1:
             raise RuntimeError(
                 "CPU stage fixture must be single-threaded before forking"
@@ -214,9 +231,10 @@ def node(cpus, args, gate, deadline, directory):
             p.join()
 
 
-def sample(cores, layout, args, out):
+def sample(layout, args, out):
     ctx = mp.get_context("spawn")
-    gate = ctx.Barrier(cores, timeout=300)
+    lane_ids = [group[0] for group in layout] if args.runner_profile else [c for group in layout for c in group]
+    gate = ctx.Barrier(len(lane_ids), timeout=300)
     deadline = ctx.RawValue("q", 0)
     with TemporaryDirectory(dir=out) as tmp:
         directory = Path(tmp)
@@ -248,8 +266,7 @@ def sample(cores, layout, args, out):
         ]
         lanes = [
             json.loads((directory / f"{cpu}.json").read_text())
-            for group in layout
-            for cpu in group
+            for cpu in lane_ids
         ]
     results = {}
     for stage in args.stages:
@@ -328,13 +345,13 @@ def compare(paths):
         lines = [
             f"### {title}",
             "",
-            f"| 流程 | 单核吞吐 B/A | 最大实测吞吐 B({b}核)/A({a}核) |",
-            "|---|---:|---:|",
+            f"| 流程 | 多核配置的并行位置 | 单核吞吐 B/A | 最大实测吞吐 B({b}核)/A({a}核) |",
+            "|---|---|---:|---:|",
         ]
         for name in plans[0]["stages"]:
             lo_a, lo_b, hi_a, hi_b = (p["stages"][name]["ops_s"] for p in plans)
             lines.append(
-                f"| {CASES[name][0]} | {lo_b / lo_a:.2f}× | {hi_b / hi_a:.2f}× |"
+                f"| {CASES[name][0]} | {micro_parallelism(name, key)} | {lo_b / lo_a:.2f}× | {hi_b / hi_a:.2f}× |"
             )
         tables.append("\n".join(lines))
     print("\n\n".join(tables))
@@ -425,18 +442,22 @@ def main():
         if args.keep_diagnostics:
             args.stages.append("runner/bookkeeping/parse_verified_ids")
         args.threaded = False
+        from renderer_bench import measure_tokenizer, service_plan
         profiles = {}
         for count in counts:
-            selected = set(ordered[:count])
-            layout = [[c for c in node if c in selected] for node in pools]
-            plan = sample(count, [node for node in layout if node], args, out)
-            profiles[count] = {}
+            service = service_plan(topo, count)
+            layout = [dp["cpus"] for dp in service["replicas"]]
+            plan = sample(layout, args, out)
+            profiles[count] = {"service_plan": service, "frontend_tokenizer": measure_tokenizer(service, args.rounds)}
             for stage, result in plan["stages"].items():
                 _, phase, key = stage.split("/")
                 rounds = result["rounds"]
+                if any(r["active_lanes"] != len(layout) for r in rounds):
+                    raise RuntimeError(f"{stage}: some DP workers missed the window; increase --seconds")
                 profiles[count].setdefault(phase, {})[key] = {
                     "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
                     "calls": sum(r["operations"] for r in rounds),
+                    "ops_s": result["ops_s"],
                 }
             if args.keep_diagnostics:
                 data["plans"][count] = plan
@@ -479,7 +500,7 @@ def main():
             data[name][count] = (
                 measure_pairs(layout, trial, out)
                 if mode == "ipc"
-                else sample(count, layout, trial, out)
+                else sample(layout, trial, out)
             )
             (out / "stages.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n"
@@ -487,10 +508,10 @@ def main():
         table = [
             "### " + heading,
             "",
-            "| 单流程 | 单位 | "
+            "| 单流程 | 单位 | 多核配置的并行位置 | "
             + " | ".join(f"{c} 核 吞吐/s（有效核）" for c in counts)
             + " |",
-            "|---|---|" + "---:|" * len(counts),
+            "|---|---|---|" + "---:|" * len(counts),
         ]
         for stage in stages:
             values = [data[name][n]["stages"][stage] for n in counts]
@@ -498,7 +519,7 @@ def main():
                 "| "
                 + " | ".join(
                     [
-                        *CASES[stage],
+                        *CASES[stage], micro_parallelism(stage, name),
                         *(
                             f"{v['ops_s']:,.2f}（{v['effective_cores']:.1f}）"
                             for v in values
@@ -513,7 +534,7 @@ def main():
         if args.keep_diagnostics:
             (out / "stages-details.md").write_text(report)
         header = (
-            ["流程", "工作单位"]
+            ["流程", "工作单位", "多核配置的并行位置"]
             + [f"{n} 核吞吐/s" for n in counts]
             + ["扩核倍数", f"{max(counts)} 核有效核"]
         )
@@ -533,6 +554,7 @@ def main():
             cells = [
                 label,
                 unit,
+                MICRO_LAYOUTS["plans"],
                 *(f"{v:,.2f}" for v in values),
                 ratio,
                 f"{peak['effective_cores']:.1f}",

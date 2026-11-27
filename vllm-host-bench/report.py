@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 
-from flow_groups import TARGETS, TEXT, groups
+from flow_groups import ENGINE, IPC, OUTPUT, SERVICE_LABELS, TARGETS, TEXT, WORKER, groups
 
 
 def point(process, stage):
@@ -183,17 +183,38 @@ def stage_values(summaries, case):
     return tables
 
 
+def detail_parallelism(targets):
+    roles = {role for role, _ in targets}
+    if not roles:
+        return "—"
+    if roles == {"frontend"}:
+        stages = {stage for _, stage in targets}
+        if "image_decode_rgb" in stages or "image_base64_encode" in stages:
+            return "跨图多核，线程池"
+        if "tokenize" in stages or "front_prefill_batch" in stages:
+            return SERVICE_LABELS[TEXT]
+        return SERVICE_LABELS[OUTPUT]
+    if roles == {"engine"} and not any("worker" in stage for _, stage in targets):
+        return SERVICE_LABELS[ENGINE]
+    if roles == {"worker"}:
+        return SERVICE_LABELS[WORKER]
+    if any("postprocess" in stage for _, stage in targets):
+        return "跨 DP、API 进程并行"
+    return SERVICE_LABELS[IPC]
+
+
 def write_detail_tables(columns, out, case="cold"):
     headings, summaries = zip(*columns, strict=True)
     tables = [stage_values(group, case) for group in summaries]
-    header = (*LABELS, *(f"{h.partition('（')[0]}（摊销墙钟 µs/请求）" if "核" in h
+    header = (*LABELS, "多核配置的并行位置", *(f"{h.partition('（')[0]}（摊销墙钟 µs/请求）" if "核" in h
                          else "摊销墙钟 µs/请求" for h in headings))
     lines = []
     for phase in ("Prefill", "Decode"):
         rows = []
-        for aligned in zip(*(table[phase] for table in tables), strict=True):
+        design = PREFILL if phase == "Prefill" else DECODE
+        for (_, _, targets), aligned in zip(design, zip(*(t[phase] for t in tables), strict=True), strict=True):
             title, location, _ = aligned[0]
-            rows.append((title, location, *(row[2] for row in aligned)))
+            rows.append((title, location, detail_parallelism(targets), *(row[2] for row in aligned)))
         lines.extend([f"## {phase}", "", "| " + " | ".join(header) + " |",
                       "|" + "---|" * len(header)])
         lines.extend("| " + " | ".join(row) + " |" for row in rows)
@@ -222,6 +243,12 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         detail = out / "details"
         detail.mkdir(exist_ok=True)
         write_detail_tables(columns, detail, case)
+    labels_by_group = SERVICE_LABELS.copy()
+    if all(len(replicas) == 1 for _, replicas in columns):
+        labels_by_group.update({ENGINE: "单 DP，一个 Core 同步调度", IPC: "单 DP，各连接独立收发",
+                                WORKER: "本 DP 内各 worker 步内同步"})
+        if all(replicas[0].get("parameters", {}).get("api_server_count") == 1 for _, replicas in columns):
+            labels_by_group[OUTPUT] = "单 API 事件循环同步处理"
     headings = [h for h, _ in columns]
     result = []
     rates = []
@@ -255,14 +282,14 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         unit = "µs/请求" if phase == "Prefill" else "µs/请求/输出步"
         if not weighted:
             unit = "摊销墙钟 µs/请求"
-        rows = [("流程", *(f"{h.partition('（')[0]}（{unit}）" if "核" in h else unit for h in headings))]
-        rows.extend((g, *(v[phase,g] for v in result)) for g in groups(phase))
+        rows = [("流程", "多核配置的并行位置", *(f"{h.partition('（')[0]}（{unit}）" if "核" in h else unit for h in headings))]
+        rows.extend((g, labels_by_group[g], *(v[phase,g] for v in result)) for g in groups(phase))
         # Sum the displayed precision so the CSV and Markdown can be checked by hand.
         totals = []
         for column in result:
             amounts = [column[phase, g] for g in groups(phase) if column[phase, g] != "—"]
             totals.append(f"{sum(map(Decimal, amounts)):.2f}" if amounts else "—")
-        rows.append(("阶段合计", *totals))
+        rows.append(("阶段合计", "—", *totals))
         with (out / f"{phase.lower()}.csv").open("w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerows(rows)
         lines.extend([f"## {phase}", "", "| " + " | ".join(rows[0]) + " |",
@@ -271,6 +298,26 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         lines.append("")
     labels = [h.split("（")[0] + " " if len(columns)>1 else "" for h in headings]
     lines.append("端到端吞吐（请求/s） " + " / ".join(f"{label}{rate:.2f}" for label, rate in zip(labels, rates)))
+    # Pooled request means, using exclusive prefill only. Template and tokenize
+    # each enqueue a job; divide both waits by requests, not the number of jobs.
+    for label, (_, replicas) in zip(labels, columns):
+        spans = defaultdict(int)
+        for replica in replicas:
+            for row in replica.get("timings", ()):
+                if row["case"] == case and row["process"] == "frontend" and row["phase"] == "prefill":
+                    spans[row["stage"]] += row["wall_sum_ns"]
+        if weighted and spans["tokenize"] and spans["request_text_elapsed"]:
+            requests = sum(len(r["host_request_latency_ns"]) for s in replicas for r in s["workload"][case])
+            pieces = (spans["tokenize"], spans["renderer_queue_wait"],
+                      spans["request_text_elapsed"] - spans["tokenize"] - spans["renderer_queue_wait"])
+            if min(pieces) < 0:
+                raise ValueError("Renderer spans exceed per-request text elapsed")
+            encode, queue, other = (ns / (1000 * requests) for ns in pieces)
+            layouts = sorted({(s["parameters"]["api_server_count"], s["parameters"]["renderer_num_workers"])
+                              for s in replicas if "api_server_count" in s.get("parameters", {})})
+            layout = "、".join(f"{a} API/DP × {w} 线程/API" for a, w in layouts)
+            lines.append(f"\n{label}请求与文本前处理明细（µs/请求，{len(replicas)} DP {layout}）　分词执行 {encode:.2f} / "
+                         f"模板及分词线程池排队 {queue:.2f} / 其余前端执行与等待 {other:.2f}")
     markdown = "\n".join(lines) + "\n"
     (out / "coverage.md").write_text(markdown)
     return markdown

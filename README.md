@@ -19,6 +19,8 @@
 
 默认全机先处理图片，再做文本模板和分词。DP8 / TP1，每 DP 并发 48、最多 48 条活动序列（整机并发 384），每请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。完整 Prefill 和 Decode 阶段表见 `host-auto/coverage.md`。
 
+三组结果均逐行标出多核配置下的并行位置，1 核列为单核基线。原版单算子默认每物理核运行独立进程，测跨任务吞吐。整网标明 renderer、媒体线程池、API 事件循环和 DP worker 的边界。整网的文本行包含请求排队，在表后单列分词执行、线程池排队及其他前端执行与等待，三项按完成请求数求均值。
+
 默认 DP8 时，整网指定的核数须为 8 的倍数。32 核对应每 DP 4 核。
 
 ### 2. 单流程
@@ -81,9 +83,11 @@ taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARC
 ./run.sh --runner-profile --core-sweep 32 --out runner-host
 ```
 
-两个脚本加 `--runner-profile` 都只输出 Prefill 和 Decode 两张表，分别含 6 项和 11 项。核数并排列出，每列按该阶段所有实测项的未舍入均值之和计算占比。单算子 Decode 的前六项来自普通单 token 步，后五项来自投机验证样本，合计是跨样本均值之和。整网按实际执行的 worker 步统计，Prefill 包含混合步，Decode 仅含纯 Decode 步，未执行的行显示 `—`。结果见输出目录下的 `runner-profile.md`，按样本拆分的调用次数和墙钟纳秒总和见 `runner-profile.json`。省略该参数时分别运行原单算子或整网基准。
+两个脚本加 `--runner-profile` 都输出 Prefill 和 Decode 两张表。worker 的 Prefill 有 6 项，Decode 有 11 项。单算子 Prefill 还单列前端 Tokenizer，每个 API 使用与整网相同的 vLLM renderer 线程池、RC5 分词器和预渲染的 32K 输入，48 个请求/DP 同批提交。单请求执行时间从线程开始分词计到导出 IDs 完成，整批吞吐用完成请求数除以第一个 API 开始到最后一个 API 完成的墙钟。表中吞吐取各测量轮的中位数。worker 占比只用该阶段 worker 各项未舍入的调用均值计算。单算子 Decode 的前六项来自普通单 token 步，后五项来自投机验证样本，合计是跨样本均值之和。整网按实际执行的 worker 步统计，Prefill 包含混合步，Decode 仅含纯 Decode 步，未执行的行显示 `—`。结果见输出目录下的 `runner-profile.md`，按样本拆分的调用次数和墙钟纳秒总和见 `runner-profile.json`。省略该参数时分别运行原单算子或整网基准。
 
-单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
+单算子 runner 在 1 核运行一个 worker，在 32、64、128、192 核运行 8 个 TP1 worker，每个共享所属 DP 的核集。模板与分词可跨请求并行，runner 的一次同步步沿单条调用链执行。NumPy 向量化与使用更多 CPU 线程是两个不同维度，此工作负载将 Torch intra-op 设为 1。worker 吞吐按所有 DP 的实测完成数和共同墙钟计算，包含循环开销及样本还原，单次耗时仅覆盖行内操作。前端线程重叠峰值只反映同时处于调用区间的线程数。分词适配器导出 32K 个 Python IDs 时共享每进程的 GIL；可用 `./run-stages.sh --layouts threads --stages tokenize_native ids_export tokenize --core-sweep 32 64` 在同一线程布局下分别观察原生 encode、已有 Encoding 导出 IDs 和完整调用。[vLLM renderer 执行器](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/renderers/base.py#L111)
+
+worker 单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
 
 #### 整网 11 行与源码的对应关系
 
