@@ -40,6 +40,7 @@ class Cases:
     """Prepared once per NUMA domain. Each lane owns its mutable state after fork."""
 
     def __init__(self, stages, render_threads):
+        self.runner_profile = any(s.startswith("runner/") for s in stages)
         root = Path(__file__).resolve().parent
         self.args = SimpleNamespace(
             model_metadata=root / "model",
@@ -77,7 +78,7 @@ class Cases:
             for m in self.messages
         ]
         self.token = self.tokenizer.encode(" hello", add_special_tokens=False)[0]
-        if {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
+        if self.runner_profile or {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
             self.engine_cfg = config(self.args, skip_tokenizer_init=True)
         self.image_path = root / "assets/input.jpg"
         self.raw = self.image_path.read_bytes()
@@ -194,7 +195,12 @@ class Cases:
                 self.batch.update(output)
                 if self.first_chunk is None:
                     self.first_chunk = output
-                if phase == "decode" and self.decode_step is None:
+                # Use a stable decode step for repeated isolated calls. Replaying a
+                # block extension would otherwise grow the cached request every time.
+                can_replay = not any(
+                    delta and any(delta) for delta in output.scheduled_cached_reqs.new_block_ids
+                ) if self.runner_profile else True
+                if phase == "decode" and self.decode_step is None and can_replay:
                     # Keep both the step and the exact preceding worker state.
                     import copy
 
@@ -245,9 +251,25 @@ class Cases:
             self.rgb = self.media.load_bytes(self.raw).media
         if "encode_image" in stages:
             self.codec = ImageCodec(self.image_path)
-        if {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
+        if self.runner_profile or {"worker_prefill", "worker_decode", "drive_scheduler"}.intersection(stages):
             self.sched, self.hasher = build_scheduler(self.engine_cfg, self.args)
             self.serial = 0
             self.batch = CpuBatch(self.args.block_size, self.token)
             self.first_chunk = self.decode_step = None
             self.drive_scheduler(0, capture=True)
+            if self.runner_profile:
+                from runner_host import RunnerHost
+                host = RunnerHost(self.engine_cfg)
+                batch = CpuBatch(self.args.block_size, self.token)
+                decode_host = RunnerHost(self.engine_cfg)
+                self.runner_ops = {
+                    "prefill": host.isolated(batch, self.first_chunk),
+                    "decode": decode_host.isolated(self.decode_batch, self.decode_step),
+                }
+                req = self.first_chunk.scheduled_new_reqs[0]
+
+                def reset_new_request():
+                    batch.reqs.pop(req.req_id, None)
+                    host.row_states[0] = None
+
+                self.reset_new_request = reset_new_request

@@ -253,6 +253,7 @@ def reserve_output_dir(requested):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runner-profile", action="store_true", help="Report exclusive host runner steps")
     parser.add_argument("--out", type=Path, default=Path("host-auto"))
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--keep-diagnostics", action="store_true",
@@ -301,6 +302,8 @@ def main():
         parser.error("Full frontend pools require image input and automatic pool sizes")
     if args.core_sweep == []:
         args.core_sweep = list(STANDARD_CORE_SWEEP)
+    if args.runner_profile and (args.tp != 1 or args.compare):
+        parser.error("--runner-profile requires TP1 and a live run")
     if args.compare:
         try:
             compare_runs(args.compare)
@@ -372,18 +375,27 @@ def main():
     scratch = out / ".runs"
     scratch.mkdir()
     columns = []
+    profiles = {}
     for trial, plan in trials:
         cores = plan["assigned_physical_cores"]
         trial.image_file = args.image_file
         trial.out = scratch / f"cores-{cores}"
         trial.out.mkdir()
         summaries = run_capacity(trial, plan, root)
+        if args.runner_profile:
+            from runner_report import collect_workers
+            profiles[cores] = collect_workers(summaries)
+            continue
         if args.keep_diagnostics:
             from stage_profile import write_profile
             write_profile(summaries, trial.out)
         heading = (f"{cores} 核（µs/请求）" if args.core_sweep else "摊销墙钟（µs/请求）")
         columns.append((heading, summaries))
-    markdown = write_stage_tables(columns, out, diagnostics=args.keep_diagnostics)
+    if args.runner_profile:
+        from runner_report import write_tables
+        markdown = write_tables(profiles, out)
+    else:
+        markdown = write_stage_tables(columns, out, diagnostics=args.keep_diagnostics)
     if not args.keep_diagnostics:
         shutil.rmtree(scratch)
     print(markdown)
@@ -436,6 +448,8 @@ def run_capacity(args, plan, root):
                    "--runs", str(args.runs), "--timeout", str(args.timeout),
                    "--round-timeout", str(args.round_timeout), "--round-gate", str(gates),
                    "--replica-id", str(i), "--out", str(directory)]
+            if args.runner_profile:
+                cmd.append("--runner-profile")
             if args.separate_image_text:
                 total_fronts = sum(r["frontend"]["api_server_count"] for r in plan["replicas"])
                 cmd.extend(["--image-barrier-parties", str(total_fronts)])

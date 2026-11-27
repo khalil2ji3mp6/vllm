@@ -84,6 +84,11 @@ def run_worker(args, rank, handle, control, token_id):
         reply.wait_until_ready()
 
     batch = CpuBatch(args.block_size, token_id)
+    runner = None
+    if args.runner_profile:
+        from engine import config
+        from runner_host import RunnerHost
+        runner = RunnerHost(config(args, skip_tokenizer_init=True))
     clock = Clock()
     while True:
         # Waiting for work is represented by end-to-end dispatch/response wall spans.
@@ -94,6 +99,8 @@ def run_worker(args, rank, handle, control, token_id):
         if item[0] == "begin":
             cpu_start = process_time_ns()
             batch = CpuBatch(args.block_size, token_id)
+            if runner is not None:
+                runner.reset()
             clock = Clock()
             continue
         if item[0] == "end":
@@ -103,10 +110,13 @@ def run_worker(args, rank, handle, control, token_id):
         phase, output, sample = item
         clock.move_last("worker_dequeue_wait_and_deserialize", phase)
         with clock.span(phase, "worker_prepare_cpu"):
-            with clock.span(phase, "worker_batch_update"):
-                batch.update(output)
-            with clock.span(phase, "worker_cpu_metadata"):
-                batch.prepare(output)
+            if runner is not None:
+                runner.step(batch, output, clock, phase)
+            else:
+                with clock.span(phase, "worker_batch_update"):
+                    batch.update(output)
+                with clock.span(phase, "worker_cpu_metadata"):
+                    batch.prepare(output)
         if reply:
             with clock.span(phase, "fixture_token_output"):
                 result = dummy_result(sample, token_id)

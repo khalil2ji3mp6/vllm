@@ -20,6 +20,7 @@ from time import perf_counter_ns
 from cpu_topology import cpu_topology
 from flow_groups import MICRO
 from host_capacity import distribute_all_cores, reserve_output_dir
+from runner_report import MEASURED, PHASES, write_tables
 from stage_counters import Counters
 from stage_transport import BOUNDARIES, measure_pairs
 
@@ -81,8 +82,16 @@ def lane(cpu, cases, args, gate, deadline, directory):
             before_copy = {"src": placement(cases.src), "dst": placement(cases.dst)}
         rows = {}
         for stage in args.stages:
-            operation = getattr(cases, stage)
-            operation(cpu % 32)
+            reset = None
+            if args.runner_profile:
+                _, phase, key = stage.split("/")
+                operation = cases.runner_ops[phase][key]
+                if phase == "prefill" and key == "worker_batch_update":
+                    reset = cases.reset_new_request
+                operation()
+            else:
+                operation = getattr(cases, stage)
+                operation(cpu % 32)
             rows[stage] = []
             for _ in range(args.rounds):
                 # Wait for the last warmup, then publish one deadline for every NUMA domain.
@@ -95,15 +104,27 @@ def lane(cpu, cases, args, gate, deadline, directory):
                 before = resource.getrusage(resource.RUSAGE_THREAD)
                 start = perf_counter_ns()
                 n = 0
-                while perf_counter_ns() < stop:
-                    operation(cpu + n)
-                    n += 1
+                measured_ns = 0
+                if args.runner_profile:
+                    while perf_counter_ns() < stop:
+                        if reset:
+                            reset()
+                        begin = perf_counter_ns()
+                        value = operation()
+                        measured_ns += perf_counter_ns() - begin
+                        del value
+                        n += 1
+                else:
+                    while perf_counter_ns() < stop:
+                        operation(cpu + n)
+                        n += 1
                 end = perf_counter_ns()
                 after = resource.getrusage(resource.RUSAGE_THREAD)
                 pmu = counters.deltas(pmu_start)
                 rows[stage].append(
                     dict(
                         n=n,
+                        **({"wall_sum_ns": measured_ns} if args.runner_profile else {}),
                         start=start,
                         end=end,
                         user=after.ru_utime - before.ru_utime,
@@ -257,6 +278,7 @@ def sample(cores, layout, args, out):
                     },
                     active_lanes=sum(r["n"] > 0 for r in group),
                     operations=n,
+                    **({"wall_sum_ns": sum(r["wall_sum_ns"] for r in group)} if args.runner_profile else {}),
                     wall_s=seconds,
                     ops_s=n / seconds,
                     effective_cores=cpu_s / seconds,
@@ -320,6 +342,7 @@ def compare(paths):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runner-profile", action="store_true", help="Isolate host runner operations on fixed scheduler steps")
     parser.add_argument("--core-sweep", nargs="+", default=["1", "all"])
     parser.add_argument("--stages", nargs="+", choices=CASES)
     parser.add_argument(
@@ -335,6 +358,8 @@ def main():
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("A_JSON", "B_JSON"))
     parser.add_argument("--keep-diagnostics", action="store_true")
     args = parser.parse_args()
+    if args.runner_profile and (args.stages or args.compare):
+        parser.error("--runner-profile selects its own operations and report")
     explicit = args.stages is not None
     args.stages = args.stages or ["text_request", "image_request"]
     if args.compare:
@@ -394,6 +419,28 @@ def main():
         thread_plans={},
         ipc_plans={},
     )
+    if args.runner_profile:
+        args.stages = [f"runner/{phase}/{key}" for phase in PHASES for key in MEASURED]
+        args.threaded = False
+        profiles = {}
+        for count in counts:
+            selected = set(ordered[:count])
+            layout = [[c for c in node if c in selected] for node in pools]
+            plan = sample(count, [node for node in layout if node], args, out)
+            profiles[count] = {phase: {} for phase in PHASES}
+            for stage, result in plan["stages"].items():
+                _, phase, key = stage.split("/")
+                rounds = result["rounds"]
+                profiles[count][phase][key] = {
+                    "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
+                    "calls": sum(r["operations"] for r in rounds),
+                }
+            if args.keep_diagnostics:
+                data["plans"][count] = plan
+        if args.keep_diagnostics:
+            (out / "stages.json").write_text(json.dumps(data, indent=2) + "\n")
+        print(write_tables(profiles, out), end="")
+        return
     reports = []
     for mode, name, heading in (
         ("process", "plans", "独立进程，每物理核一条流水"),

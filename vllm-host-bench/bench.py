@@ -523,6 +523,7 @@ def run(args):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--runner-profile", action="store_true")
     p.add_argument("--model-metadata", type=Path, default=Path("model").resolve())
     p.add_argument("--tp", type=int, default=8)
     p.add_argument("--prompt-tokens", type=int, default=32768)
