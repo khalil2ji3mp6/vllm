@@ -259,12 +259,16 @@ class Cases:
             self.drive_scheduler(0, capture=True)
             if self.runner_profile:
                 from runner_host import RunnerHost
+                from runner_spec_host import SpecHostCases
                 host = RunnerHost(self.engine_cfg)
                 batch = CpuBatch(self.args.block_size, self.token)
                 decode_host = RunnerHost(self.engine_cfg)
+                verifier = SpecHostCases(self.engine_cfg)
                 self.runner_ops = {
                     "prefill": host.isolated(batch, self.first_chunk),
                     "decode": decode_host.isolated(self.decode_batch, self.decode_step),
+                    "speculative": verifier.operations(),
+                    "bookkeeping": {"parse_verified_ids": verifier.parse_verified_ids},
                 }
                 req = self.first_chunk.scheduled_new_reqs[0]
 

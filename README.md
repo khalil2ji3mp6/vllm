@@ -73,11 +73,11 @@ taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARC
 ./run.sh --runner-profile --core-sweep 32 --out runner-host
 ```
 
-两个入口使用同一组实现，输出目录内的 `runner-profile.md` 保留图示的 11 行，`runner-profile.json` 保存每行的调用次数和墙钟纳秒总和。Prefill 包含混合调度步，Decode 只含纯 Decode 步。表中时间为每次 worker 调度步该操作的平均墙钟 µs。整网合并所有 DP 和正式轮的出现次数，单算子合并所有独立物理核流水和正式轮的调用。占比的分母为同表六个实测行均值之和。符号 `—` 表示此路径未执行。完整的进程通信、队列等待、前端和输出处理仍可用本页第 1 节的命令统计。
+整网的 `runner-profile.md` 保留图示的 11 行。单算子按输入条件输出普通 Prefill、普通 Decode 和投机 Decode 三张表。`runner-profile.json` 保存每行的调用次数和墙钟纳秒总和。Prefill 包含混合调度步，Decode 只含纯 Decode 步。表中时间为每次 worker 调度步该操作的平均墙钟 µs。整网合并所有 DP 和正式轮的出现次数，单算子合并所有独立物理核流水和正式轮的调用。占比的分母为同表各实测行均值之和。符号 `—` 表示此路径未执行。完整的进程通信、队列等待、前端和输出处理仍可用本页第 1 节的命令统计。
 
 单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
 
-#### 11 行与源码的对应关系
+#### 整网 11 行与源码的对应关系
 
 下表对应 vLLM `ced6857a` 和 Ascend V1 runner `33746f6e`。参考日志提供了步骤和百分比，未给出源码版本、batch 形状、draft 方法、图模式和设备同步点。下表按源码里可识别的调用边界映射。[原始统计](https://gitcode.com/khalilzhk/tmp/blob/main/1127%201040.log)
 
@@ -96,3 +96,18 @@ taskset -c "$CPUS" ./run.sh --core-sweep 32 --keep-diagnostics --out "host-${ARC
 | `propose` | `propose_draft_token_ids` 分派到具体 proposer。Eagle/MTP 等模型路径准备输入、运行草稿 forward 并产生候选 token，n-gram 等方法走不同代码。真实计时若单列 draft padding，需要从 propose 父区间中扣除。 | —，无草稿 forward 或候选生成。|
 
 源码入口可从 [Ascend execute_model](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/worker/v1/model_runner.py#L2332)、[Ascend slot mapping](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/worker/block_table.py#L160)、[Ascend forward context](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/ascend_forward_context.py#L115)、[Ascend 草稿模型路径](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/spec_decode/llm_base_proposer.py#L1010) 和 [vLLM 输入预处理](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/v1/worker/gpu_model_runner.py#L3513) 查看。模拟中对应的代码集中在 [runner_host.py](vllm-host-bench/runner_host.py) 和 [runner_report.py](vllm-host-bench/runner_report.py)。
+
+
+#### 单算子补测的五个 Host 子段
+
+`./run-stages.sh --runner-profile --core-sweep 1 32 --keep-diagnostics` 同时测普通输入和投机验证。投机表固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。每行独立回放，共用相同的样本，占比为该行平均墙钟除以五行均值之和。
+
+| 单算子 | 此版本具体计时 |
+|---|---|
+| model_forward | 按 Ascend `_model_forward` 绑定调用参数，在目标模型 eager 路径按 GLM 配置遍历 78 层，执行每层的 token 维度和辅助输出检查。计算层、模块内部调度、算子下发和图回放均跳过。 |
+| compute logits | 对预置的 4 行投影结果执行 TP1 普通 LM head 路径的词表切片，生成共享存储的 tensor 视图。隐藏状态 gather 和矩阵乘跳过。 |
+| rej sample | 校验候选长度，用 vLLM `SamplingMetadata` 创建 bonus 采样参数并构造 `SamplerOutput`。设备采样及接受判定跳过。同步回包后还有一次真实 `RejectionSampler.parse_output`，开启 `--keep-diagnostics` 时独立报告它过滤占位符、导出 Python IDs 的时间。 |
+| padding process for draft | 使用真实 vLLM 图规格 dispatcher，先按本地草稿长度查一次，再按协调后的长度查一次。独立 DP 下长度相同，基准设置 PIECEWISE 规格 1、4、8，2 个有效位置选中 4。计入 CPU 查表及描述符生成，未捕获或启动图。 |
+| propose | 选择插件支持的 CPU 紧凑草稿输入路径。执行上游 `prepare_next_token_ids_cpu`，根据拒绝数修正序列长度、重算 query 起点，生成保留 token 的索引。next ID 落在 CPU 上，索引和长度均有实际数值。草稿模型 forward、H2D 以及默认 padded GPU 路径不在本行。 |
+
+投机样本专用于比较两台 CPU 的指定代码段。PIECEWISE 配合紧凑输入，避免 Ascend 对 FULL 图与禁用 padded drafter 的组合限制。正式运行的默认 padded drafter 会把部分工作放在设备上。这五项在 [单算子实现](vllm-host-bench/runner_spec_host.py) 中，与整网固定 token 的 worker 独立。[GLM 模型主循环](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/model_executor/models/deepseek_v2.py#L1504) · [Ascend logits](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/ops/vocab_parallel_embedding.py#L542) · [拒绝采样](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/sample/rejection_sampler.py#L146) · [草稿输入压紧](https://github.com/vllm-project/vllm-ascend/blob/33746f6e0810c0c2886a6fafde1b9ba9ced47ed7/vllm_ascend/spec_decode/llm_base_proposer.py#L2251)

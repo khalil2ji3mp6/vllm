@@ -17,6 +17,13 @@ ROWS = (
     ("propose", "propose", None),
 )
 MEASURED = tuple(key for _, _, key in ROWS if key)
+SPEC_ROWS = (
+    ("model_forward", "model_forward", "model_forward"),
+    ("compute logits", "compute logits", "compute_logits"),
+    ("rej sample", "rej sample", "rej_sample"),
+    ("propose", "padding process for draft", "draft_padding"),
+    ("propose", "propose", "propose"),
+)
 PHASES = ("prefill", "decode")
 
 
@@ -50,11 +57,21 @@ def write_tables(profiles, out: Path):
     for cores, phases in profiles.items():
         for phase, group in phases.items():
             means = {k: v["wall_sum_ns"] / v["calls"] / 1000 for k, v in group.items() if v["calls"]}
+            if phase == "bookkeeping":
+                sections.append(f"采样后处理单算子 · {cores} 核 · parse_output "
+                                f"{means['parse_verified_ids']:,.2f} µs/步（独立计时）")
+                continue
             total = sum(means.values())
-            lines = [f"## {phase.capitalize()} · {cores} 核", "",
+            rows = ROWS
+            title = phase.capitalize()
+            if "speculative" in phases:
+                rows = SPEC_ROWS if phase == "speculative" else ROWS[:len(MEASURED)]
+                if phase == "speculative":
+                    title = "投机 Decode 单算子 · 仅 Host 子段（B=1，K=3）"
+            lines = [f"## {title} · {cores} 核", "",
                      "| 图示对应 | 步骤 | 耗时（µs/worker 步） | 耗时占比（%） |",
                      "|---|---|---:|---:|"]
-            for parent, step, key in ROWS:
+            for parent, step, key in rows:
                 cells = f"{means[key]:,.2f} | {100 * means[key] / total:.2f}%" if key in means else "— | —"
                 lines.append(f"| {parent} | {step} | {cells} |")
             sections.append("\n".join(lines))

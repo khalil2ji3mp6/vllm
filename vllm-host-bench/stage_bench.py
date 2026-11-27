@@ -20,7 +20,7 @@ from time import perf_counter_ns
 from cpu_topology import cpu_topology
 from flow_groups import MICRO
 from host_capacity import distribute_all_cores, reserve_output_dir
-from runner_report import MEASURED, PHASES, write_tables
+from runner_report import MEASURED, PHASES, SPEC_ROWS, write_tables
 from stage_counters import Counters
 from stage_transport import BOUNDARIES, measure_pairs
 
@@ -421,17 +421,20 @@ def main():
     )
     if args.runner_profile:
         args.stages = [f"runner/{phase}/{key}" for phase in PHASES for key in MEASURED]
+        args.stages.extend(f"runner/speculative/{key}" for _, _, key in SPEC_ROWS)
+        if args.keep_diagnostics:
+            args.stages.append("runner/bookkeeping/parse_verified_ids")
         args.threaded = False
         profiles = {}
         for count in counts:
             selected = set(ordered[:count])
             layout = [[c for c in node if c in selected] for node in pools]
             plan = sample(count, [node for node in layout if node], args, out)
-            profiles[count] = {phase: {} for phase in PHASES}
+            profiles[count] = {}
             for stage, result in plan["stages"].items():
                 _, phase, key = stage.split("/")
                 rounds = result["rounds"]
-                profiles[count][phase][key] = {
+                profiles[count].setdefault(phase, {})[key] = {
                     "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
                     "calls": sum(r["operations"] for r in rounds),
                 }
