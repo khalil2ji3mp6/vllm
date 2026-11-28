@@ -35,7 +35,7 @@ cat single-200k/coverage.md
 
 该模式固定 DP1/TP1、并发 1，从当前可用物理核中选取一个 CPU。API、EngineCore 和 worker 在同一 Python 进程内直接传递对象，renderer 和媒体线程继承同一个 CPU 掩码。默认输入为 200K token 合成英文文本和一张 1024×1024 JPEG，Prefill 分块为 16K。可用 `--text-only` 单测文本，或用外层 `taskset` 指定 CPU。
 
-默认先预热一条，再用新建的调度器和空 KV 状态测一条完整请求。模板渲染、分词、图片解码、调度、worker 输入准备和输出序列化在计时内，模型计算继续使用整网的固定 token 返回。首次序列化输出划分 Prefill 与 Decode，直到最后一次序列化输出为端到端耗时。Prefill 的本地入队含 KV 哈希，Decode 的 IPC 为零。分项均按墙钟计时，剩余循环、模拟返回和计时开销单独列出。结果为 `coverage.md` 和含纳秒数据、绑定 CPU 及步数的 `summary.json`。
+默认先预热一条，再用新建的调度器和空 KV 状态测一条完整请求。模板渲染、分词、图片解码、调度、worker 输入准备和输出序列化在计时内，模型计算继续使用整网的固定 token 返回。首次序列化输出划分 Prefill 与 Decode，直到最后一次序列化输出为端到端耗时。“进程通信与入队”在 Prefill 计入本地入队与 KV 哈希，Decode 为零。阶段合计为已列分项之和，各行占比以该合计为分母。端到端墙钟独立测量。结果为 `coverage.md` 和含纳秒数据、绑定 CPU 及步数的 `summary.json`。
 
 ### 整网并发与线程
 

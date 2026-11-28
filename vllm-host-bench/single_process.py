@@ -93,10 +93,9 @@ async def run_request(args, cfg, renderer, inputs, tokenizer, entries, images, t
             times[TEXT] = duration(phase, "request_text_elapsed")
             times[IMAGE] = duration(phase, "request_image_elapsed")
             times[IPC] = duration(phase, "front_engine_encode_send")
-        other = wall - sum(times.values())
-        if other < 0:
+        if sum(times.values()) > wall:
             raise RuntimeError(f"Overlapping {phase} timers")
-        phases[phase] = dict(stages_ns=times, other_ns=other, wall_ns=wall, steps=steps[phase])
+        phases[phase] = dict(stages_ns=times, wall_ns=wall, steps=steps[phase])
     return dict(**phases, e2e_ns=last - started, tokenizer_ns=duration("prefill", "tokenize"),
                 prompt_tokens=prompt, generated=emitted, decode_tokens=decode)
 
@@ -112,15 +111,15 @@ def report(result):
     ]
     for phase in ("prefill", "decode"):
         data = result[phase]
-        header = "| 流程 | 完整耗时（ms） | 占比 |"
+        header = "| 流程 | 分项耗时（ms） | 占比 |"
         if phase == "decode":
             header += " 每输出步（µs） |"
         lines += [f"## {phase.capitalize()}", "", header, "|---|---:|---:|" + ("---:|" if phase == "decode" else "")]
-        rows = {**data["stages_ns"], "其余循环与模拟开销": data["other_ns"], "阶段合计": data["wall_ns"]}
+        measured = sum(data["stages_ns"].values())
+        rows = {**data["stages_ns"], "阶段合计": measured}
         for group, ns in rows.items():
-            name = "请求本地入队（含 KV 哈希）" if group == IPC and phase == "prefill" else group
-            share = f"{100 * ns / data['wall_ns']:.2f}%" if data["wall_ns"] else "—"
-            line = f"| {name} | {ns/1e6:.3f} | {share} |"
+            share = f"{100 * ns / measured:.2f}%" if measured else "—"
+            line = f"| {group} | {ns/1e6:.3f} | {share} |"
             if phase == "decode":
                 avg = f"{ns/1000/result['decode_tokens']:.2f}" if result["decode_tokens"] else "—"
                 line += f" {avg} |"
