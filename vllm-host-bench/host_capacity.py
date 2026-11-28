@@ -336,8 +336,14 @@ def main():
     if min(args.runs, args.timeout, args.round_timeout, args.prompt_tokens,
            args.new_tokens, args.chunk_tokens) <= 0 or args.warmup < 0:
         parser.error("Positive test counts and nonnegative warmup required")
-    if args.prompt_tokens + args.new_tokens > 135000 or args.chunk_tokens % 128:
-        parser.error("Total sequence length must fit 135000 and chunk size must align to 128")
+    sequence_len = args.prompt_tokens + args.new_tokens
+    model_config = Path(__file__).resolve().parent / "model" / "config.json"
+    context_limit = json.loads(model_config.read_text())["max_position_embeddings"]
+    if sequence_len > context_limit:
+        parser.error(f"Prompt and output together must fit {context_limit} tokens")
+    if args.chunk_tokens % 128:
+        parser.error("Chunk size must align to 128")
+    args.max_model_len = min(context_limit, max(135000, sequence_len))
     if args.core_sweep is not None and api_per_replica is not None:
         parser.error("The core sweep uses automatic frontend settings")
     if args.core_sweep is not None and (args.renderer_num_workers is not None or
@@ -449,7 +455,7 @@ def run_capacity(args, plan, root):
                    "--api-server-count", str(frontend["api_server_count"]),
                    "--renderer-num-workers", str(frontend["renderer_num_workers"]),
                    "--prompt-tokens", str(args.prompt_tokens), "--new-tokens", str(args.new_tokens),
-                   "--max-num-seqs", str(args.max_num_seqs),
+                   "--max-num-seqs", str(args.max_num_seqs), "--max-model-len", str(args.max_model_len),
                    "--chunk-tokens", str(args.chunk_tokens), "--warmup", str(args.warmup),
                    "--runs", str(args.runs), "--timeout", str(args.timeout),
                    "--round-timeout", str(args.round_timeout), "--round-gate", str(gates),
