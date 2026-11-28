@@ -253,7 +253,10 @@ def reserve_output_dir(requested):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="Single-process, one-core run: ./run.sh --single-process --help")
-    parser.add_argument("--runner-profile", action="store_true", help="Report exclusive host runner steps")
+    reports = parser.add_mutually_exclusive_group()
+    reports.add_argument("--request-mean", action="store_true",
+                         help="Average per-request stage spans across all measured rounds and DPs")
+    reports.add_argument("--runner-profile", action="store_true", help="Report exclusive host runner steps")
     parser.add_argument("--out", type=Path, default=Path("host-auto"))
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--keep-diagnostics", action="store_true",
@@ -407,7 +410,8 @@ def main():
         from runner_report import write_tables
         markdown = write_tables(profiles, out)
     else:
-        markdown = write_stage_tables(columns, out, diagnostics=args.keep_diagnostics)
+        markdown = write_stage_tables(columns, out, diagnostics=args.keep_diagnostics,
+                                      request_mean=args.request_mean)
     if not args.keep_diagnostics:
         shutil.rmtree(scratch)
     print(markdown)

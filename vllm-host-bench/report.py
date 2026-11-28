@@ -272,12 +272,12 @@ def amortized_stage_values(replicas, case, counts, output_tokens):
     return values
 
 
-def write_stage_tables(columns, out, case="cold", diagnostics=False):
+def write_stage_tables(columns, out, case="cold", diagnostics=False, request_mean=False):
     # Retained pre-group summaries can still be rendered using their original schema.
     wall_versions = {s.get("batch_wall_version", 0) for _, replicas in columns for s in replicas}
     if len(wall_versions) != 1 or not wall_versions <= {0, 1}:
         raise ValueError("Incompatible whole-host stage timing versions")
-    batch_wall = wall_versions == {1}
+    batch_wall = wall_versions == {1} and not request_mean
     recorded = ["request_stage_ns" in r for _, replicas in columns for s in replicas
                 for r in s["workload"][case]]
     versions = {r.get("frontend_elapsed_version", 1) for _, replicas in columns
@@ -285,6 +285,8 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
     if len(versions) != 1:
         raise ValueError("Frontend timing boundaries differ between runs")
     weighted = all(recorded)
+    if request_mean and (not recorded or not weighted):
+        raise ValueError("Per-request timing requires request_stage_ns for every round")
     if any(recorded) != weighted:
         raise ValueError("Cannot compare request-weighted and historical measurements")
     if TEXT not in columns[0][1][0]["stage_intervals"][case][0]["Prefill"]:
@@ -335,6 +337,8 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         unit = "µs/请求" if phase == "Prefill" else "µs/请求/输出步"
         if batch_wall:
             unit = "整批摊销 " + unit
+        elif request_mean:
+            unit = "逐请求平均 " + unit
         elif not weighted:
             unit = "摊销墙钟 µs/请求"
         rows = [("流程", "多核配置的并行位置", *(f"{h.partition('（')[0]}（{unit}）" if "核" in h else unit for h in headings))]
@@ -350,7 +354,7 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
         lines.extend([f"## {phase}", "", "| " + " | ".join(rows[0]) + " |",
                       "|" + "---|" * len(rows[0])])
         for group, scope, *cells in rows[1:]:
-            if batch_wall:
+            if batch_wall or request_mean:
                 cells = [f"{cell}（{100 * Decimal(cell) / Decimal(total):.2f}%）"
                          if cell != "—" and total != "—" and Decimal(total) else cell
                          for cell, total in zip(cells, totals)]

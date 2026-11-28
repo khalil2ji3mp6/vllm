@@ -63,6 +63,18 @@ cat single-200k/coverage.md
 
 Prefill 按完成请求数摊销。Decode 按实际输出 token 数减去每请求首 token 后的总步数摊销。阶段合计为表中各行之和，括号为各行占同列合计的比例。Tokenizer 已计入文本行。使用 `--keep-diagnostics` 可在逐 DP 的 `summary.json` 中查看原有按请求累计的 `request_stage_ns` 及原始分词计时汇总。
 
+### 64 核、200K 输入，按请求统计前处理时延
+
+```bash
+./run.sh --dp 8 --tp 1 --cores-per-replica 8 --api-server-count 8 \
+  --concurrency-per-replica 8 --max-num-seqs 8 \
+  --renderer-num-workers 8 --media-loading-threads 8 --no-separate-image-text \
+  --prompt-tokens 204800 --new-tokens 1024 --chunk-tokens 16384 \
+  --warmup 1 --runs 5 --request-mean --out host-request-mean
+```
+
+每 DP 同时提交 8 条，每个 API 的分词池与图片池各有 8 个线程槽。关闭跨 DP 图文屏障后，每条请求在自己的图片准备好时继续渲染文本。逐请求记录从本 API 批次提交到该请求校验结束、从图片准备好到该请求前端状态注册完成的两段墙钟，二者之和计入文本。中间从校验结束到图片准备好计入图片。全机所有实测请求等权平均，包含每条请求实际经历的线程派发及协程恢复等待。Decode 以首 token 之后的请求输出步数为分母。
+
 ### Ascend V1 worker 分步测试
 
 新版单算子的 `--prompt-tokens` 接受一个或多个输入长度，默认 32K，K 等于 1024，也可直接写 token 数。长度包括 GLM 对话模板产生的 token。每档使用相同构造方式的重复英文文本，预先渲染后，在同一物理核上计时 RC5 分词和 Python token ID 列表导出。worker 收到这次分词生成的相同内容。
