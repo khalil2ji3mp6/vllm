@@ -16,6 +16,24 @@
 
 海光所有档位都从 NUMA 2、6 各 16 个物理核组成的核池中选取。1 核使用节点 2 的第一个可用物理核；8、16、32 核分别在两个节点各取 4、8、16 核。脚本按进程可见的拓扑选核，完整套件要求两个节点各有 16 核可用。内存分配沿用系统策略。ARM 在调用进程允许的 NUMA 节点间选取物理核。套件及下列独立入口均遵守海光核池限制。每次运行保存在独立目录，三组完成后更新 `host-bench-results/latest.md`。
 
+### 200K 核数对比与 64 核长度对比
+
+在有至少 64 个可用物理核的测试环境中运行。每组完成后可直接查看一份汇总，包括分词、图片解码、端到端吞吐与时延，以及 Prefill 和 Decode 各阶段耗时与占比。
+
+```bash
+./run-compare.sh cores   && cat host-bench-results/compare-cores/latest.md
+./run-compare.sh lengths && cat host-bench-results/compare-lengths/latest.md
+```
+
+也可一次跑完两组：`./run-compare.sh && cat host-bench-results/compare-all/latest.md`。
+
+| 对比 | 配置 | 每 DP 前端布局 | 计时轮数 |
+|---|---|---|---:|
+| `cores` | 200K 输入，32 / 64 核 | 2 个 API 进程，每个进程的分词池与图片池各 2 / 4 线程 | 5 |
+| `lengths` | 64 核，32K / 128K / 200K / 400K 输入 | 1 个 API 进程，分词池与图片池各 8 线程 | 3 |
+
+两组沿用各自历史实测的前端布局。固定 DP8/TP1、每 DP 并发和最大活跃序列均为 24、输出 1,024 token、16K 分块、每请求一张 1024×1024 JPEG。每档预热 1 轮，保留逐 DP 原始数据；K 表示 1,024。此前限定为 NUMA 2、6 共 32 核的海光环境无法运行 64 核档。
+
 ### 分别运行
 
 ```bash
