@@ -56,12 +56,18 @@ def write_tables(profiles, out: Path):
         worker_scope = "跨 worker 进程并行，步内同步"
     for phase in PHASES:
         rows = ROWS if phase == "prefill" else ROWS + SPEC_ROWS
+        include_tokenizer = phase == "prefill" and all("tokenize" in p[phase] for p in profiles.values())
+        if include_tokenizer:
+            rows = (("文本前处理", "Tokenizer（RC5）", "tokenize"),) + rows
         header = ["图示对应", "步骤"]
         if not single:
             header.append("多核配置的并行位置")
         columns = []
         for cores, phases in profiles.items():
-            header.extend([f"{cores} 核耗时（µs/次）", f"{cores} 核占比"])
+            label = f"{cores} 核"
+            if "prompt_tokens" in phases:
+                label = f"1 核 · {phases['prompt_tokens']:,} tokens "
+            header.extend([f"{label}耗时（µs/次）", f"{label}占比"])
             group = phases[phase]
             if phase == "decode":
                 # Preserve the original fixtures in JSON. Only the displayed
@@ -83,7 +89,7 @@ def write_tables(profiles, out: Path):
                 else:
                     cells.extend(["—", "—"])
             lines.append("| " + " | ".join(cells) + " |")
-        cells = ["**合计**", "worker 实测项均值之和"]
+        cells = ["**合计**", "整段分词 + worker 首步" if include_tokenizer else "worker 实测项均值之和"]
         if not single:
             cells.append("—")
         for means, total in columns:

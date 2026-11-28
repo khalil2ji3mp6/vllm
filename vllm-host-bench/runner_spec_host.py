@@ -18,10 +18,10 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 class SpecHostCases:
-    def __init__(self, cfg):
+    def __init__(self, cfg, prompt_tokens=32768):
         self.vocab = cfg.model_config.get_vocab_size()
         self.ids = torch.tensor([7, 11, 12, 13], dtype=torch.int32)
-        self.positions = torch.arange(32768, 32772)
+        self.positions = torch.arange(prompt_tokens, prompt_tokens + 4)
         self.model = torch.nn.Module()  # callable for argument binding only
         hf = cfg.model_config.hf_config
         self.layers = torch.nn.ModuleList(torch.nn.Module() for _ in range(hf.num_hidden_layers))
@@ -47,7 +47,7 @@ class SpecHostCases:
             logitsprocs=LogitsProcessors(), spec_token_ids=[[11, 12, 13]],
         )
         self.query_start = torch.tensor([0, 4], dtype=torch.int32)
-        self.seq_lens = torch.tensor([32772], dtype=torch.int32)
+        self.seq_lens = torch.tensor([prompt_tokens + 4], dtype=torch.int32)
         self.arange = np.arange(4, dtype=np.int32)
         self.batch = SimpleNamespace(req_ids=["r0"])
         self.scheduled = {"r0": 4}

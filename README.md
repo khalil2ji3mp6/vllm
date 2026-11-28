@@ -12,7 +12,7 @@
 |---|---|---|
 | 原版单算子 | 1、8、16、32 | 文本前处理和图片处理，每个物理核一个独立进程 |
 | 整网 | 8、16、32 | DP8/TP1，每 DP 固定 16 个请求，整机并发 128 |
-| 新版 worker 单算子 | 1 | Prefill 6 项、Decode 11 项，输出每次耗时和占比 |
+| 新版 worker 单算子 | 1 | 32K、128K、200K 输入。Prefill 7 项（含分词）、Decode 11 项，输出每次耗时和占比 |
 
 海光所有档位都从 NUMA 2、6 各 16 个物理核组成的核池中选取。1 核使用节点 2 的第一个可用物理核；8、16、32 核分别在两个节点各取 4、8、16 核。脚本按进程可见的拓扑选核，完整套件要求两个节点各有 16 核可用。内存分配沿用系统策略。ARM 在调用进程允许的 NUMA 节点间选取物理核。套件及下列独立入口均遵守海光核池限制。每次运行保存在独立目录，三组完成后更新 `host-bench-results/latest.md`。
 
@@ -21,7 +21,7 @@
 ```bash
 ./run-stages.sh                   # 原版单算子，1 / 8 / 16 / 32 核
 ./run.sh                          # 整网，8 / 16 / 32 核
-./run-stages.sh --runner-profile  # 新版单算子，仅 1 核
+./run-stages.sh --runner-profile --prompt-tokens 32k 128k 200k  # 新版单算子，同一物理核
 ```
 
 单独选档可用 `./run.sh --core-sweep 16` 或 `./run-stages.sh --core-sweep 8 16`。原版单算子的报告为 `stages.md`，整网的两张表在 `coverage.md`，新版单算子的两张表在 `runner-profile.md`。进程通信等定位用例可通过原版入口的 `--stages` 单独指定。
@@ -32,7 +32,9 @@
 
 ### Ascend V1 worker 分步测试
 
-新版单算子直接使用原请求的 32K token IDs，跳过前端 Tokenizer、模板、媒体和入队。真实分词仍属于原版单算子和整网的文本前处理。占比分母取本阶段 worker 各实测项未舍入均值之和。单算子 Decode 前六项使用普通步，后五项使用独立投机样本。另可通过 `./run.sh --runner-profile --core-sweep 32` 在整网工作负载采集 worker 步骤。整网 Prefill 含混合步，未执行的行标为 `—`。
+新版单算子的 `--prompt-tokens` 接受一个或多个输入长度，默认 32K，K 等于 1024，也可直接写 token 数。长度包括 GLM 对话模板产生的 token。每档使用相同构造方式的重复英文文本，预先渲染后，在同一物理核上计时 RC5 分词和 Python token ID 列表导出。worker 收到这次分词生成的相同内容。
+
+每档 Prefill 占比的分母为整条输入分词一次的均值，加上 worker 首个分块六项各自的均值。32K、128K、200K 的 worker 首步均调度 16K token，后续分块不计入该合计。单算子 Decode 前六项使用普通步，后五项使用独立投机样本。另可通过 `./run.sh --runner-profile --core-sweep 32` 在整网工作负载采集 worker 步骤。整网 Prefill 含混合步，未执行的行标为 `—`。
 
 worker 单算子为单序列固定输入，分别回放首次 16K-token Prefill 分块和无需新增 KV 块的单 token Decode 步。每个操作单独运行，前置数据、还原请求状态和预热在计时窗口外。整网在同步 DP8/TP1 工作负载中逐步取样，每次使用调度器实际发出的整个 batch。两张表分别回答独立调用的成本和在线批处理下的成本。CPU 空间复用、批大小、块表变化和进程竞争都会影响两者。
 
@@ -59,7 +61,7 @@ worker 单算子为单序列固定输入，分别回放首次 16K-token Prefill 
 
 #### 单算子补测的五个 Host 子段
 
-`./run-stages.sh --runner-profile --core-sweep 1 --keep-diagnostics` 同时测普通输入和投机验证。投机样本固定为 TP1、单序列、已有 32K 上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。五项独立回放同一个投机样本，在 Decode 表中与前六项共用分母。
+`./run-stages.sh --runner-profile --core-sweep 1 --keep-diagnostics` 同时测普通输入和投机验证。投机样本固定为 TP1、单序列、已有指定输入长度的上下文、3 个候选。样本接受第一个候选并输出一个替换 token，验证步宽 4，草稿输入保留 2 个位置。候选和验证结果在计时前生成。五项独立回放同一个投机样本，在 Decode 表中与前六项共用分母。
 
 | 单算子 | 此版本具体计时 |
 |---|---|

@@ -58,11 +58,12 @@ class RunnerChecks(unittest.TestCase):
         from vllm.config import CUDAGraphMode
 
         args = NS(model_metadata=Path(__file__).resolve().parents[1] / "model",
-                  max_model_len=135000, renderer_num_workers=1, block_size=128,
+                  max_model_len=205824, renderer_num_workers=1, block_size=128,
                   max_num_seqs=32, chunk_tokens=16384, tp=1, blocks=8192)
         cfg = config(args, skip_tokenizer_init=True)
         original_mode = cfg.compilation_config.cudagraph_mode
-        sample = SpecHostCases(cfg)
+        sample = SpecHostCases(cfg, 204800)
+        self.assertEqual(sample.positions.tolist(), list(range(204800, 204804)))
         self.assertEqual(cfg.compilation_config.cudagraph_mode, original_mode)
         self.assertIs(sample.model_forward().keywords["positions"], sample.positions)
         self.assertEqual(sample.compute_logits().data_ptr(), sample.logits.data_ptr())
@@ -75,7 +76,7 @@ class RunnerChecks(unittest.TestCase):
         self.assertEqual(mode, CUDAGraphMode.PIECEWISE)
         self.assertEqual(descriptor.num_tokens, 4)
         self.assertEqual([t.tolist() for t in sample.propose()],
-                         [[17], [32770], [0, 2], [0, 1]])
+                         [[17], [204802], [0, 2], [0, 1]])
 
     def test_two_tables_with_shared_decode_denominator(self):
         # Every regular row averages 1 us. Each speculative row averages 2 us
@@ -94,20 +95,38 @@ class RunnerChecks(unittest.TestCase):
             whole = write_tables({32: dict(prefill=ordinary, decode={})}, Path(directory))
             self.assertIn("| propose | propose | — | — | — |", whole)
 
-    def test_worker_fixture_skips_tokenizer(self):
+    def test_worker_uses_real_token_ids(self):
         from stage_cases import Cases
-        with patch("stage_cases.GlmRc5Tokenizer", side_effect=AssertionError("unexpected tokenizer")):
-            fixture = Cases(["runner/prefill/worker_batch_update"], 1)
+        fixture = Cases(["runner/prefill/tokenize"], 1)
+        self.assertEqual(fixture.encode_runner_prompt(), fixture.requests[0].prompt_token_ids)
         self.assertEqual(len(fixture.requests[0].prompt_token_ids), 32768)
         self.assertEqual(fixture.ids_hash.hexdigest(),
                          "edb6bccbc6d08dc652681680f6705adb5675ec579e948083c79919f694e01662")
+
+    def test_long_prompt_and_worker_chunk(self):
+        from stage_cases import Cases
+
+        stages = ["runner/prefill/tokenize"]
+        fixture = Cases(stages, 1, prompt_tokens=204800)
+        self.assertEqual(len(fixture.encode_runner_prompt()), 204800)
+        fixture.initialize_lane(stages)
+        self.assertEqual(fixture.first_chunk.total_num_scheduled_tokens, 16384)
+        self.assertEqual(fixture.decode_step.total_num_scheduled_tokens, 1)
+
+    def test_prefill_tokenizer_share_per_length(self):
         item = dict(calls=2, wall_sum_ns=4000)
+        profiles = {}
+        for length, duration in [(32768, 6000), (204800, 18000)]:
+            prefill = {MEASURED[0]: item, "tokenize": dict(calls=3, wall_sum_ns=duration)}
+            profiles[length] = dict(dp_size=1, tp_size=1, prompt_tokens=length, prefill=prefill, decode={})
         with TemporaryDirectory() as directory:
-            md = write_tables({1: dict(dp_size=1, tp_size=1, prefill={MEASURED[0]: item},
-                                       decode={})}, Path(directory))
-        self.assertIn("_update_states | 2.00 | 100.00%", md)
-        self.assertNotIn("Tokenizer", md)
-        self.assertNotIn("多核配置", md)
+            report = write_tables(profiles, Path(directory))
+        prefill, decode = report.split("## Decode")
+        self.assertIn("Tokenizer（RC5） | 2.00 | 50.00% | 6.00 | 75.00%", prefill)
+        self.assertIn("| **4.00** | 100% | **8.00** | 100%", prefill)
+        self.assertIn("204,800 tokens", prefill)
+        self.assertNotIn("Tokenizer", decode)
+        self.assertNotIn("多核配置", report)
 
     def test_hygon_core_sweep_respects_memory_node_affinity(self):
         from cpu_topology import benchmark_topology, hygon_pool

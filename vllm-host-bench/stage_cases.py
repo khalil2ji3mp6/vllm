@@ -2,6 +2,7 @@
 
 import hashlib
 from array import array
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,25 +40,29 @@ def sampling():
 class Cases:
     """Prepared once per NUMA domain. Each lane owns its mutable state after fork."""
 
-    def __init__(self, stages, render_threads):
+    def __init__(self, stages, render_threads, prompt_tokens=32768):
         self.runner_profile = any(s.startswith("runner/") for s in stages)
         root = Path(__file__).resolve().parent
         self.args = SimpleNamespace(
             model_metadata=root / "model",
-            max_model_len=135000,
+            max_model_len=max(135000, prompt_tokens + 1024),
             renderer_num_workers=render_threads,
             block_size=128,
             max_num_seqs=32,
             chunk_tokens=16384,
             tp=1,
-            blocks=8192,
+            blocks=max(8192, (prompt_tokens + 1024 + 127) // 128 + 1),
         )
         if self.runner_profile:
-            # The original request-0 GLM sample, already tokenized. The scheduler
-            # consumes the same IDs and returns the same fixed output token.
-            ids = ([154822, 154824, 154826, 25062, 287, 29905, 371, 25, 7487,
-                    154827, 1900, 220, 15, 13, 60359, 279, 18629, 13]
-                   + [1273] * 32748 + [154828, 154841])
+            tokenizer = GlmRc5Tokenizer(self.args.model_metadata)
+            messages, = prompt_factory(tokenizer, [0], prompt_tokens)
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            # Time the same encode + Python ID export that supplies the worker fixture.
+            # Rendering, calibrating the text length and compiling RC5 happen before timing.
+            self.encode_runner_prompt = partial(tokenizer.encode, text, add_special_tokens=False)
+            ids = self.encode_runner_prompt()
+            if len(ids) != prompt_tokens:
+                raise ValueError(f"Expected {prompt_tokens} input IDs, got {len(ids)}")
             self.ids_hash = hashlib.sha256(array("I", ids).tobytes())
             self.token = 23745
             self.engine_cfg = config(self.args, skip_tokenizer_init=True)
@@ -228,7 +233,7 @@ class Cases:
             emitted += sum(
                 len(o.new_token_ids) for g in groups.values() for o in g.outputs
             )
-        assert prompt_tokens == 32768 and emitted == 1024
+        assert prompt_tokens == len(req.prompt_token_ids) and emitted == 1024
 
     def worker_prefill(self, _):
         self.batch.update(self.first_chunk)
@@ -278,9 +283,9 @@ class Cases:
                 host = RunnerHost(self.engine_cfg)
                 batch = CpuBatch(self.args.block_size, self.token)
                 decode_host = RunnerHost(self.engine_cfg)
-                verifier = SpecHostCases(self.engine_cfg)
+                verifier = SpecHostCases(self.engine_cfg, len(self.requests[0].prompt_token_ids))
                 self.runner_ops = {
-                    "prefill": host.isolated(batch, self.first_chunk),
+                    "prefill": {"tokenize": self.encode_runner_prompt, **host.isolated(batch, self.first_chunk)},
                     "decode": decode_host.isolated(self.decode_batch, self.decode_step),
                     "speculative": verifier.operations(),
                     "bookkeeping": {"parse_verified_ids": verifier.parse_verified_ids},

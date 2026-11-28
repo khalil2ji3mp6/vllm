@@ -6,6 +6,7 @@ import json
 import multiprocessing as mp
 import os
 import platform
+import re
 import resource
 import signal
 import traceback
@@ -181,7 +182,7 @@ def node(cpus, args, gate, deadline, directory):
         from stage_cases import Cases
         from vllm.utils.gc_utils import freeze_gc_heap
 
-        cases = Cases(args.stages, len(cpus) if args.threaded else 1)
+        cases = Cases(args.stages, len(cpus) if args.threaded else 1, args.prompt_tokens)
         fixture = {"token_ids_sha256": cases.ids_hash.hexdigest()}
         if not args.runner_profile:
             fixture["image_sha256"] = hashlib.sha256(cases.raw).hexdigest()
@@ -353,9 +354,21 @@ def compare(paths):
     print("\n\n".join(tables))
 
 
+def token_count(value):
+    match = re.fullmatch(r"([0-9]+)([kK]?)", value)
+    if match:
+        count = int(match[1]) * (1024 if match[2] else 1)
+        # Minimum GLM chat fixture is 20 IDs. Reserve room for the 1K output.
+        if 20 <= count <= 1048576 - 1024:
+            return count
+    raise argparse.ArgumentTypeError("use 20..1047552 tokens, e.g. 32768 or 32k")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runner-profile", action="store_true", help="Isolate host runner operations on fixed scheduler steps")
+    parser.add_argument("--prompt-tokens", nargs="+", type=token_count, metavar="LENGTH",
+                        help="Isolated runner input lengths in tokens (default 32k; K = 1024)")
     parser.add_argument("--core-sweep", nargs="+", default=None)
     parser.add_argument("--stages", nargs="+", choices=CASES)
     parser.add_argument(
@@ -373,6 +386,12 @@ def main():
     args = parser.parse_args()
     if args.runner_profile and (args.stages or args.compare):
         parser.error("--runner-profile selects its own operations and report")
+    if args.prompt_tokens and not args.runner_profile:
+        parser.error("--prompt-tokens is available with --runner-profile")
+    lengths = args.prompt_tokens or [32768]
+    if len(set(lengths)) != len(lengths):
+        parser.error("Specify each prompt length once")
+    args.prompt_tokens = lengths[0]
     explicit = args.stages is not None
     args.stages = args.stages or ["text_request", "image_request"]
     if args.compare:
@@ -437,27 +456,34 @@ def main():
         ipc_plans={},
     )
     if args.runner_profile:
-        args.stages = [f"runner/{phase}/{key}" for phase in PHASES for key in MEASURED]
+        args.stages = ["runner/prefill/tokenize"]
+        args.stages.extend(f"runner/{phase}/{key}" for phase in PHASES for key in MEASURED)
         args.stages.extend(f"runner/speculative/{key}" for _, _, key in SPEC_ROWS)
         if args.keep_diagnostics:
             args.stages.append("runner/bookkeeping/parse_verified_ids")
         args.threaded = False
         profiles = {}
         layout = [[ordered[0]]]
-        plan = sample(layout, args, out)
-        profiles[1] = {"cpu": ordered[0], "dp_size": 1, "tp_size": 1}
-        for stage, result in plan["stages"].items():
-            _, phase, key = stage.split("/")
-            rounds = result["rounds"]
-            if any(r["active_lanes"] != len(layout) for r in rounds):
-                raise RuntimeError(f"{stage}: some DP workers missed the window; increase --seconds")
-            profiles[1].setdefault(phase, {})[key] = {
-                "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
-                "calls": sum(r["operations"] for r in rounds),
-                "ops_s": result["ops_s"],
-            }
+        for length in lengths:
+            args.prompt_tokens = length
+            # Single-length JSON retains the original physical-core key.
+            key_id = 1 if len(lengths) == 1 else length
+            plan = sample(layout, args, out)
+            profile = {"cpu": ordered[0], "prompt_tokens": length, "dp_size": 1, "tp_size": 1}
+            for stage, result in plan["stages"].items():
+                _, phase, key = stage.split("/")
+                rounds = result["rounds"]
+                if any(r["active_lanes"] != len(layout) for r in rounds):
+                    raise RuntimeError(f"{stage}: some DP workers missed the window; increase --seconds")
+                profile.setdefault(phase, {})[key] = {
+                    "wall_sum_ns": sum(r["wall_sum_ns"] for r in rounds),
+                    "calls": sum(r["operations"] for r in rounds),
+                    "ops_s": result["ops_s"],
+                }
+            profiles[key_id] = profile
+            if args.keep_diagnostics:
+                data["plans"][key_id] = plan
         if args.keep_diagnostics:
-            data["plans"][1] = plan
             (out / "stages.json").write_text(json.dumps(data, indent=2) + "\n")
         print(write_tables(profiles, out), end="")
         return

@@ -58,7 +58,7 @@ report="$run/summary.md"
 {
     printf '# vLLM 无卡 CPU 基准 · %s\n\n' "$platform"
     printf '%s · %s · %s · %s 个可用物理核\n\n' "$(hostname)" "$model" "$(date '+%F %T %z')" "$full"
-    printf '原版单算子用 1、8、16、32 核。整网用 8、16、32 核，DP8/TP1，每 DP 并发 16，32K 输入、1K 输出。新版 worker 单算子仅测 1 核，使用预分词输入。\n'
+    printf '原版单算子用 1、8、16、32 核。整网用 8、16、32 核，DP8/TP1，每 DP 并发 16，32K 输入、1K 输出。新版单算子在同一物理核依次测 32K、128K、200K 输入。\n'
     printf '整网每 DP 一个 API，三个档位每 DP 分配 1、2、4 核，renderer 与媒体池各配 1、2、4 个线程，按阶段运行。\n'
     if [[ -n "$local32" ]]; then
         printf '\n海光 NUMA 2、6 各取 16 个物理核，taskset CPU 列表为 `%s`，内存沿用系统分配策略。\n' "$local32"
@@ -94,8 +94,8 @@ run_case 02-host "DP8 · 8、16、32 核" coverage.md ./run.sh --dp 8 --core-swe
     --concurrency-per-replica 16 --max-num-seqs 16
 
 printf '\n## 3. 新版 worker 单算子\n' >> "$report"
-printf '\n输入为已分词的 32K token IDs。Tokenizer 由前两组测试覆盖。Decode 合计包含普通步和投机样本。\n' >> "$report"
-run_case 03-runner "1 核" runner-profile.md ./run-stages.sh --runner-profile --core-sweep 1
+printf '\nPrefill 合计包含一次完整输入分词和 worker 的首个 16K 分块。Decode 合计包含普通步和投机样本。\n' >> "$report"
+run_case 03-runner "1 核 · 32K、128K、200K" runner-profile.md ./run-stages.sh --runner-profile --prompt-tokens 32k 128k 200k
 
 # Publish only complete runs; concurrent invocations keep separate result directories.
 ln -s "$(basename "$run")/summary.md" "$run/latest-link"
