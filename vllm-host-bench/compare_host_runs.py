@@ -19,10 +19,9 @@ TITLES = {"cores": "200K 输入，32 / 64 物理核", "lengths": "64 物理核�
 
 
 def run_args(mode, cores, length_k):
-    # Preserve the frontend process counts of the two independently measured series.
-    fronts, runs = (16, 5) if mode == "cores" else (8, 3)
+    runs = 5 if mode == "cores" else 3
     return [str(ROOT / "run.sh"), "--dp", "8", "--tp", "1",
-            "--cores-per-replica", str(cores // 8), "--api-server-count", str(fronts),
+            "--cores-per-replica", str(cores // 8), "--api-server-count", "8",
             "--concurrency-per-replica", "24", "--max-num-seqs", "24",
             "--prompt-tokens", str(length_k * 1024), "--new-tokens", "1024",
             "--chunk-tokens", "16384", "--separate-image-text",
@@ -72,7 +71,7 @@ def table(headers, rows):
 def comparison(mode, results):
     headers = ["指标", *results]
     lines = [f"## {TITLES[mode]}", ""]
-    layout = ("每 DP 两个 API，各池每 API 由 2 增至 4 线程，计时 5 轮。"
+    layout = ("每 DP 一个 API，分词池和图片池各由 4 增至 8 线程，计时 5 轮。"
               if mode == "cores" else "每 DP 一个 API，各池每 API 8 线程，计时 3 轮。")
     lines.extend([layout, "", "### 前端与端到端", ""])
     metrics = [m for _, m in results.values()]
