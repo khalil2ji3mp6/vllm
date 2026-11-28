@@ -6,4 +6,7 @@ if [[ ! -x "$python" ]]; then
   echo "Run $kit/install.sh first." >&2
   exit 2
 fi
+if [[ ${1:-} == --single-process ]]; then
+    exec "$kit/vllm-host-bench/run-native.sh" "$@"
+fi
 exec "$python" "$kit/vllm-host-bench/host_capacity.py" "$@"

@@ -26,6 +26,17 @@
 
 单独选档可用 `./run.sh --core-sweep 16` 或 `./run-stages.sh --core-sweep 8 16`。原版单算子的报告为 `stages.md`，整网的两张表在 `coverage.md`，新版单算子的两张表在 `runner-profile.md`。进程通信等定位用例可通过原版入口的 `--stages` 单独指定。
 
+### 一个进程、一个物理核、一条请求
+
+```bash
+./run.sh --single-process --prompt-tokens 204800 --new-tokens 1024 --out single-200k
+cat single-200k/coverage.md
+```
+
+该模式固定 DP1/TP1、并发 1，从当前可用物理核中选取一个 CPU。API、EngineCore 和 worker 在同一 Python 进程内直接传递对象，renderer 和媒体线程继承同一个 CPU 掩码。默认输入为 200K token 合成英文文本和一张 1024×1024 JPEG，Prefill 分块为 16K。可用 `--text-only` 单测文本，或用外层 `taskset` 指定 CPU。
+
+默认先预热一条，再用新建的调度器和空 KV 状态测一条完整请求。模板渲染、分词、图片解码、调度、worker 输入准备和输出序列化在计时内，模型计算继续使用整网的固定 token 返回。首次序列化输出划分 Prefill 与 Decode，直到最后一次序列化输出为端到端耗时。Prefill 的本地入队含 KV 哈希，Decode 的 IPC 为零。分项均按墙钟计时，剩余循环、模拟返回和计时开销单独列出。结果为 `coverage.md` 和含纳秒数据、绑定 CPU 及步数的 `summary.json`。
+
 ### 整网并发与线程
 
 每个请求输入 32K token 和一张 1024×1024 JPEG，输出 1K token。各档均为 8 个 DP，每个 DP 一个 API、一个 EngineCore 和一个 TP1 worker，最多 16 条活动序列。8、16、32 核分别给每个 DP 1、2、4 个物理核。每 API 的 renderer 池和媒体池容量也分别为 1、2、4；先处理图片，再渲染文本，各角色共享该 DP 核集。线程池容量表示并发上限。固定请求量使不同档位的吞吐和单请求耗时可直接对照。新增核心有助于不同请求并行和进程间调度，同一 DP 内连续 Decode 步依序执行。

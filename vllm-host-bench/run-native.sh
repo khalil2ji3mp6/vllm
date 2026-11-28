@@ -10,4 +10,8 @@ fi
 export PYTHONPATH="$root/.host-src"
 export PYTHONHASHSEED=0
 export VLLM_HOST_SOURCE_COMMIT="$commit"
+if [[ ${1:-} == --single-process ]]; then
+    shift
+    exec "$root/.venv/bin/python" "$root/single_process.py" "$@"
+fi
 exec "$root/.venv/bin/python" "$root/bench.py" --model-metadata "$root/model" "$@"

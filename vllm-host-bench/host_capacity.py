@@ -252,7 +252,7 @@ def reserve_output_dir(requested):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Single-process, one-core run: ./run.sh --single-process --help")
     parser.add_argument("--runner-profile", action="store_true", help="Report exclusive host runner steps")
     parser.add_argument("--out", type=Path, default=Path("host-auto"))
     parser.add_argument("--plan-only", action="store_true")

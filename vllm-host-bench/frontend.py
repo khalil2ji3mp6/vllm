@@ -101,7 +101,7 @@ def peak_parallel(intervals):
 
 
 async def preprocess_requests(args, front_index, entries, images, renderer, name,
-                              input_processor, processor, encoder, sock, batch_clock):
+                              input_processor, processor, submit_request, batch_clock):
     # All entries are ready when this frontend submits its batch to the event loop.
     submitted = perf_counter_ns()
 
@@ -163,7 +163,7 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
             (start, perf_counter_ns(), preprocess_cpu)
         )
         with clock.span("prefill", "front_engine_encode_send"):
-            await sock.send_multipart(encoder.encode(req))
+            await submit_request(req)
         for key, values in clock.rows.items():
             batch_clock.rows[key].extend(values)
         batch_clock.merge_resources(clock)
@@ -242,9 +242,12 @@ async def stream_outputs(sock, decoder, processor, clock, batch_start_ns, reques
 
 async def run_front_round(args, front_index, entries, images, renderer, name,
                           input_processor, processor, encoder, decoder, sock, clock, batch_start_ns):
+    def submit_request(req):
+        return sock.send_multipart(encoder.encode(req))
+
     return await asyncio.gather(
         preprocess_requests(args, front_index, entries, images, renderer, name,
-                            input_processor, processor, encoder, sock, clock),
+                            input_processor, processor, submit_request, clock),
         stream_outputs(sock, decoder, processor, clock, batch_start_ns, len(entries)),
     )
 
