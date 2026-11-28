@@ -155,6 +155,7 @@ async def preprocess_requests(args, front_index, entries, images, renderer, name
         clock.rows["prefill", "request_text_elapsed"].extend(
             [(submitted, validated, 0), (media_ready, ready, 0)]
         )
+        clock.rows["prefill", "text_after_media"].append((media_ready, ready, 0))
         if images:
             clock.rows["prefill", "request_image_elapsed"].append((validated, media_ready, 0))
         preprocess_cpu = sum(cpu for samples in clock.rows.values() for _, _, cpu in samples)

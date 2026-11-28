@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 
-from flow_groups import ENGINE, IPC, OUTPUT, SERVICE_LABELS, TARGETS, TEXT, WORKER, groups
+from flow_groups import ENGINE, IMAGE, IPC, OUTPUT, SERVICE_LABELS, TARGETS, TEXT, WORKER, groups
 
 
 def point(process, stage):
@@ -117,6 +117,11 @@ def merge_intervals(intervals):
     return merged
 
 
+def batch_window(intervals):
+    """First start to last completion of one batch, including gaps between waves."""
+    return [(min(a for a, _ in intervals), max(b for _, b in intervals))] if intervals else []
+
+
 def capture_stage_intervals(processes):
     spans = defaultdict(list)
     for process, phases in processes.items():
@@ -146,6 +151,10 @@ def capture_stage_intervals(processes):
         for group in groups(section):
             rows[group] = merge_intervals(span for proc, stage in TARGETS[group]
                                           for span in spans.get((section, proc, stage), ()))
+    # These frontend operations happen once per request. Preserve separate
+    # validation and rendering windows to exclude the intervening image phase.
+    for name in ("request_validate", "text_after_media", "request_image_elapsed", "tokenize"):
+        captured["Prefill"][name] = batch_window(spans["Prefill", "frontend", name])
     return captured
 
 
@@ -226,8 +235,49 @@ def write_detail_tables(columns, out, case="cold"):
     return markdown
 
 
+def amortized_stage_values(replicas, case, counts, output_tokens):
+    elapsed = defaultdict(int)
+    for index in range(len(counts)):
+        rounds = [s["stage_intervals"][case][index] for s in replicas]
+        windows = {
+            key: batch_window([span for r in rounds for span in r["Prefill"][key]])
+            for key in ("request_validate", "text_after_media", "request_image_elapsed", "tokenize")
+        }
+        front = {
+            TEXT: windows["request_validate"] + windows["text_after_media"],
+            IMAGE: windows["request_image_elapsed"],
+            "tokenize": windows["tokenize"],
+        }
+        for phase in ("Prefill", "Decode"):
+            names = [*groups(phase), "tokenize"] if phase == "Prefill" else groups(phase)
+            for group in names:
+                if phase == "Prefill" and group in front:
+                    spans = front[group]
+                else:
+                    # Recurring steps alternate with other stages. Count overlapping
+                    # work only once, excluding gaps occupied by unrelated operations.
+                    spans = (span for r in rounds for span in r[phase][group])
+                active = merge_intervals(spans)
+                if active:
+                    elapsed[phase, group] += sum(end - start for start, end in active)
+    requests = sum(counts)
+    decode_steps = output_tokens - requests
+    values = {}
+    for phase in ("Prefill", "Decode"):
+        divisor = requests if phase == "Prefill" else decode_steps
+        names = [*groups(phase), "tokenize"] if phase == "Prefill" else groups(phase)
+        for group in names:
+            key = (phase, group)
+            values[key] = f"{elapsed[key] / (1000 * divisor):.2f}" if key in elapsed and divisor else "—"
+    return values
+
+
 def write_stage_tables(columns, out, case="cold", diagnostics=False):
     # Retained pre-group summaries can still be rendered using their original schema.
+    wall_versions = {s.get("batch_wall_version", 0) for _, replicas in columns for s in replicas}
+    if len(wall_versions) != 1 or not wall_versions <= {0, 1}:
+        raise ValueError("Incompatible whole-host stage timing versions")
+    batch_wall = wall_versions == {1}
     recorded = ["request_stage_ns" in r for _, replicas in columns for s in replicas
                 for r in s["workload"][case]]
     versions = {r.get("frontend_elapsed_version", 1) for _, replicas in columns
@@ -259,6 +309,9 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
                             for n, batch in zip(counts, rounds, strict=True)))
         values = {}
         samples = [r for batch in rounds for r in batch]
+        if batch_wall:
+            result.append(amortized_stage_values(replicas, case, counts, sum(r["output_tokens"] for r in samples)))
+            continue
         for phase in ("Prefill", "Decode"):
             denominator = (sum(counts) if phase == "Prefill" else
                            sum(r["output_tokens"] for r in samples) - sum(counts))
@@ -280,7 +333,9 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
     lines = []
     for phase in ("Prefill", "Decode"):
         unit = "µs/请求" if phase == "Prefill" else "µs/请求/输出步"
-        if not weighted:
+        if batch_wall:
+            unit = "整批摊销 " + unit
+        elif not weighted:
             unit = "摊销墙钟 µs/请求"
         rows = [("流程", "多核配置的并行位置", *(f"{h.partition('（')[0]}（{unit}）" if "核" in h else unit for h in headings))]
         rows.extend((g, labels_by_group[g], *(v[phase,g] for v in result)) for g in groups(phase))
@@ -294,19 +349,27 @@ def write_stage_tables(columns, out, case="cold", diagnostics=False):
             csv.writer(f).writerows(rows)
         lines.extend([f"## {phase}", "", "| " + " | ".join(rows[0]) + " |",
                       "|" + "---|" * len(rows[0])])
-        lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
+        for group, scope, *cells in rows[1:]:
+            if batch_wall:
+                cells = [f"{cell}（{100 * Decimal(cell) / Decimal(total):.2f}%）"
+                         if cell != "—" and total != "—" and Decimal(total) else cell
+                         for cell, total in zip(cells, totals)]
+            lines.append("| " + " | ".join([group, scope, *cells]) + " |")
         lines.append("")
     labels = [h.split("（")[0] + " " if len(columns)>1 else "" for h in headings]
     lines.append("端到端吞吐（请求/s） " + " / ".join(f"{label}{rate:.2f}" for label, rate in zip(labels, rates)))
     # Pooled request means, using exclusive prefill only. Template and tokenize
     # each enqueue a job; divide both waits by requests, not the number of jobs.
+    if batch_wall:
+        lines.append("\n其中 Tokenizer 整批摊销（µs/请求） " + " / ".join(
+            f"{label}{values['Prefill', 'tokenize']}" for label, values in zip(labels, result)))
     for label, (_, replicas) in zip(labels, columns):
         spans = defaultdict(int)
         for replica in replicas:
             for row in replica.get("timings", ()):
                 if row["case"] == case and row["process"] == "frontend" and row["phase"] == "prefill":
                     spans[row["stage"]] += row["wall_sum_ns"]
-        if weighted and spans["tokenize"] and spans["request_text_elapsed"]:
+        if not batch_wall and weighted and spans["tokenize"] and spans["request_text_elapsed"]:
             requests = sum(len(r["host_request_latency_ns"]) for s in replicas for r in s["workload"][case])
             pieces = (spans["tokenize"], spans["renderer_queue_wait"],
                       spans["request_text_elapsed"] - spans["tokenize"] - spans["renderer_queue_wait"])

@@ -382,6 +382,7 @@ def write_report(args, samples, timed_rounds, topology, masks, frontend_masks, i
         "workload": samples,
         "timings": rows,
         "stage_intervals": intervals,
+        "batch_wall_version": 1,
     }
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
