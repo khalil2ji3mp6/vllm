@@ -111,19 +111,17 @@ def report(result):
     ]
     for phase in ("prefill", "decode"):
         data = result[phase]
-        header = "| 流程 | 分项耗时（ms） | 占比 |"
-        if phase == "decode":
-            header += " 每输出步（µs） |"
-        lines += [f"## {phase.capitalize()}", "", header, "|---|---:|---:|" + ("---:|" if phase == "decode" else "")]
+        unit = "ms/请求" if phase == "prefill" else "µs/输出 token"
+        lines += [f"## {phase.capitalize()}", "", f"| 流程 | 耗时（{unit}） | 占比 |", "|---|---:|---:|"]
         measured = sum(data["stages_ns"].values())
         rows = {**data["stages_ns"], "阶段合计": measured}
         for group, ns in rows.items():
             share = f"{100 * ns / measured:.2f}%" if measured else "—"
-            line = f"| {group} | {ns/1e6:.3f} | {share} |"
+            value = f"{ns / 1e6:.3f}"
             if phase == "decode":
-                avg = f"{ns/1000/result['decode_tokens']:.2f}" if result["decode_tokens"] else "—"
-                line += f" {avg} |"
-            lines.append(line)
+                tokens = result["decode_tokens"]
+                value = f"{ns / (1000 * tokens):.2f}" if tokens else "—"
+            lines.append(f"| {group} | {value} | {share} |")
         lines.append("")
     lines.append(f"Tokenizer {result['tokenizer_ns']/1e6:.3f} ms（含在文本前处理），"
                  f"端到端 {result['e2e_ns']/1e6:.3f} ms。")
